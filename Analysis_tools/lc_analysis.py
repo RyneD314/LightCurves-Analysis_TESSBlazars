@@ -2,6 +2,7 @@
 lc_analysis.py
 
 Created 08/2022
+last update: 05/22/23
 
 Original Author: Ryne Dingler
 
@@ -27,6 +28,7 @@ import pandas as pd
 import numpy as np
 import scipy.optimize as op
 import scipy.special as sp
+import scipy.constants as cst
 from scipy.optimize import curve_fit
 from scipy import stats as st
 from scipy.ndimage import gaussian_filter
@@ -49,8 +51,11 @@ def linear(x,m,b):
 def gaussian(x, A, μ, σ):
     return(A * np.exp(-(x - μ)**2 / (2*σ**2)))
 
+# def gaussian_adv(x, A, μ, σ):
+#     return((A/(np.sqrt(2*np.pi)*σ)) * np.exp(-(x - μ)**2 / (2*σ**2)))
+
 def lognormal(x, A, μ, σ):
-    return(1/x * gaussian(np.log(x), A, μ, σ))
+    return(gaussian(np.log(x), A, μ, σ)/x)
 
 def bimodal(x, p, A, μ1, σ1, B, μ2, σ2):
     ϕ = 0.5 + np.arctan(p)/np.pi
@@ -91,6 +96,17 @@ def round_up_decimals(num:float, dec:int):
     scale = 10**dec
     return(np.ceil(num * scale) / scale)
 
+
+def ticklabels(bin_center):
+    
+    tick_labels = [str(np.round(x,decimals=2)) for x in bin_center]
+    
+    n = 3    
+    while len(np.unique(np.array(tick_labels, dtype = float))) != len(bin_center):
+        tick_labels = [str(np.round(x,decimals=n)) for x in bin_center]
+        n += 1
+        
+    return(tick_labels)
 ###########################################################################################################
 ###########################################################################################################
 def Min_PDF(params,hist,model,force_scipy=True):
@@ -128,7 +144,7 @@ def Min_PDF(params,hist,model,force_scipy=True):
     
     return(np.sum(chi))
 
-def OptBins(data,maxM=100):
+def OptBins(data, maxbinS=10, maxbinL=20, minbin = 7):
     '''
      Python version of the 'optBINS' algorithm by Knuth et al. (2006) - finds 
      the optimal number of bins for a one-dimensional data set using the 
@@ -144,26 +160,74 @@ def OptBins(data,maxM=100):
     
      Ref: Connolly 2015, K.H. Knuth. 2012. Optimal data-based binning for histograms
      and histogram-based probability density models, Entropy.
+     Ref: Shimazaki 2011. Neural Comput 19 1503-1527, 2007
     '''
+    def posterior_opt(binM,data):
+        logp = []
+        for M in binM:
+            n = np.histogram(data,bins=M)[0] # Bin the data (equal width bins)
+
+            # calculate posterior probability
+            part1 = N * np.log(M) + sp.gammaln(M/2.)
+            part2 = - M * sp.gammaln(0.5)  - sp.gammaln(N + M/2.)
+            part3 = np.sum(sp.gammaln(n+0.5))
+            logp.append(part1 + part2 + part3) # add to array of posteriors
+
+        return(binM[np.argmax(logp)])
+    
+    def shimizaki_opt(binM,data):
+        C = []
+        for M in binM:
+            n, bins = np.histogram(data,bins=M) # Bin the data (equal width bins)
+            width = bins[1] - bins[0]
+
+            k = np.nanmean(n)
+            v = np.nanstd(n)
+
+            # calculate posterior probability
+            numer = 2*k - v
+            denom = width**2
+            C.append(numer/denom) # add to array of posteriors
+        
+        return(binM[np.argmin(C)])
+    
+       
     
     N = len(data)
-    
-    # loop through the different numbers of bins
-    # and compute the posterior probability for each.
-    
-    logp = np.zeros(maxM)
-    
-    for M in range(1,maxM+1):
-        n = np.histogram(data,bins=M)[0] # Bin the data (equal width bins)
-        
-        # calculate posterior probability
-        part1 = N * np.log(M) + sp.gammaln(M/2.0)
-        part2 = - M * sp.gammaln(0.5)  - sp.gammaln(N + M/2.0)
-        part3 = np.sum(sp.gammaln(n+0.5))
-        logp[M-1] = part1 + part2 + part3 # add to array of posteriors
 
-    maximum = np.argmax(logp) + 1 # find bin number of maximum probability
-    return(maximum + 10)
+    Sqrt = int(np.ceil(np.sqrt(N)))
+    Sturge = int(np.ceil(np.log2(N)) + 1.)
+    Rice = int(np.ceil(2*N**(1./3.)))
+    
+    skew = st.skew(data)
+    Doane = int(1.5+ np.log2(N) + np.log2(1. + np.abs(skew)/np.sqrt(6.*(N-2.)/((N+1.)*(N+3.)))))
+    
+    std = np.nanstd(data)
+    Scott = int(0.5 + (N**(1./3.)*(np.nanmax(data) - np.nanmin(data))/(3.5*std)))
+    
+    iqr = np.quantile(data,0.75) - np.quantile(data,0.25)
+    FD = int(0.5 + (N**(1./3.)*(np.nanmax(data) - np.nanmin(data)) / (2.*iqr)))
+    
+    minM = np.min([Sqrt,Sturge,Rice,Doane,Scott,FD])
+    if minM < minbin:
+        minM = minbin
+    maxM = np.max([Sqrt,Sturge,Rice,Doane,Scott,FD])
+    if maxM < minbin:
+        maxM = minbin
+
+    binM = range(minM,maxM+1)
+          
+    if N >= 150:  
+        if minM != maxM:
+            return(posterior_opt(binM,data)) #find bin number of maximum probability
+        else:
+            return(posterior_opt(range(minbin,maxbinL),data))
+    else:
+        if minM != maxM:
+            return(shimizaki_opt(binM,data)) #find bin number of maximum probability
+        else:
+            return(shimizaki_opt(range(minbin,maxbinS),data))
+
 
 ###########################################################################################################
 ###########################################################################################################
@@ -200,22 +264,47 @@ def check_col_label(rootdir,bin1,bin2,sample = "", raw = False):
         
         if raw == True:
             header = ['Target','<F>(raw)','σ_F(raw)','<ΔF>(raw)', 'σ_ΔF(raw)',\
-            '<F>(unbinned)', '<F>('+bin1+'hr)','<F>('+bin2+'hr)',\
-                'σ_F(unbinned)','σ_F('+bin1+'hr)', 'σ_F('+bin2+'hr)',\
-                    '<ΔF>(unbinned)','<ΔF>('+bin1+'hr)','<ΔF>('+bin2+'hr)',\
-                        'σ_ΔF(unbinned)', 'σ_ΔF('+bin1+'hr)','σ_ΔF('+bin2+'hr)',\
-                            'σ^2_NXS(unbinned)','err(σ^2_NXS)(unbinned)','σ^2_NXS('+bin1+'hr)','err(σ^2_NXS)('+bin1+'hr)','σ^2_NXS('+bin2+'hr)','err(σ^2_NXS)('+bin2+'hr)',\
-                                'F_var(unbinned)','err(F_var)(unbinned)','F_var('+bin1+'hr)','err(F_var)('+bin1+'hr)','F_var('+bin2+'hr)','err(F_var)('+bin2+'hr)',\
-                                    'τ(inc,days)', 'Δt(inc,days)', 'τ(dec,days)', 'Δt(dec,days)','χ^2','dof','χ^2/dof']
+                '<F>(unbinned)', 'σ_F(unbinned)','<ΔF>(unbinned)','σ_ΔF(unbinned)',\
+                    '<F>('+bin1+'hr)','σ_F('+bin1+'hr)','<ΔF>('+bin1+'hr)','σ_ΔF('+bin1+'hr)',\
+                        '<F>('+bin2+'hr)','σ_F('+bin2+'hr)','<ΔF>('+bin2+'hr)','σ_ΔF('+bin2+'hr)',\
+                                'σ^2_NXS(unbinned)','err(σ^2_NXS)(unbinned)',\
+                                    'σ^2_NXS('+bin1+'hr)','err(σ^2_NXS)('+bin1+'hr)',\
+                                        'σ^2_NXS('+bin2+'hr)','err(σ^2_NXS)('+bin2+'hr)',\
+                                            'F_var(unbinned)','err(F_var)(unbinned)',\
+                                                'F_var('+bin1+'hr)','err(F_var)('+bin1+'hr)',\
+                                                    'F_var('+bin2+'hr)','err(F_var)('+bin2+'hr)',\
+                                                        'σ_rms(unbinned)','err(σ_rms)(unbinned)',
+                                                            'σ_rms('+bin1+'hr)','err(σ_rms)('+bin1+'hr)',
+                                                                'σ_rms('+bin2+'hr)','err(σ_rms)('+bin2+'hr)',\
+                                                                    'RmsFluxSig(6hr)','RmsFluxSig(12hr)','RmsFluxSig(6hr_binned)','RmsFluxSig(12hr_binned)',\
+                                                                        'τ_inc(days)','σ_τ,inc(days)','Δt_inc(days)','τ_exp,inc(days)',\
+                                                                            'τ_dec(days)','σ_τ,dec(days)','Δt_dec(days)','τ_exp,dec(days)',\
+                                                                                'δ','R_min(km,10^8 Ms)', 'R(km,10^8 Ms)', 'R_max(km,10^8 Ms)',\
+                                                                                    'Rs_min (10^8 Ms)', 'Rs (10^8 Ms)', 'Rs_max (10^8 Ms)',\
+                                                                                        'χ^2','dof','χ^2/dof']
+                                    
+                                    
         
         elif raw == False:
-            header = ['Target','<F>(unbinned)', '<F>('+bin1+'hr)','<F>('+bin2+'hr)',\
-            'σ_F(unbinned)','σ_F('+bin1+'hr)', 'σ_F('+bin2+'hr)',\
-                '<ΔF>(unbinned)','<ΔF>('+bin1+'hr)','<ΔF>('+bin2+'hr)',\
-                    'σ_ΔF(unbinned)', 'σ_ΔF('+bin1+'hr)','σ_ΔF('+bin2+'hr)',\
-                        '<σ^2_XS>(unbinned)','<σ^2_XS>('+bin1+'hr)','<σ^2_XS>('+bin2+'hr)',\
-                            'F_var(unbinned)','<F_var>('+bin1+'hr)','<F_var>('+bin2+'hr)',\
-                                'τ(inc,days)', 'Δt(inc,days)', 'τ(dec,days)', 'Δt(dec,days)','χ^2','dof','χ^2/dof']
+            header = ['Target','<F>(unbinned)', 'σ_F(unbinned)','<ΔF>(unbinned)','σ_ΔF(unbinned)',\
+                '<F>('+bin1+'hr)','σ_F('+bin1+'hr)','<ΔF>('+bin1+'hr)','σ_ΔF('+bin1+'hr)',\
+                    '<F>('+bin2+'hr)','σ_F('+bin2+'hr)','<ΔF>('+bin2+'hr)','σ_ΔF('+bin2+'hr)',\
+                            'σ^2_NXS(unbinned)','err(σ^2_NXS)(unbinned)',\
+                                'σ^2_NXS('+bin1+'hr)','err(σ^2_NXS)('+bin1+'hr)',\
+                                    'σ^2_NXS('+bin2+'hr)','err(σ^2_NXS)('+bin2+'hr)',\
+                                        'F_var(unbinned)','err(F_var)(unbinned)',\
+                                            'F_var('+bin1+'hr)','err(F_var)('+bin1+'hr)',\
+                                                'F_var('+bin2+'hr)','err(F_var)('+bin2+'hr)',\
+                                                    'σ_rms(unbinned)','err(σ_rms)(unbinned)',
+                                                        'σ_rms('+bin1+'hr)','err(σ_rms)('+bin1+'hr)',
+                                                            'σ_rms('+bin2+'hr)','err(σ_rms)('+bin2+'hr)',\
+                                                                'RmsFluxSig(6hr)','RmsFluxSig(12hr)','RmsFluxSig(6hr_binned)','RmsFluxSig(12hr_binned)',\
+                                                                    'τ_inc(days)', 'Δt_inc(days)','σ_τ,inc(days)','τ_exp,inc(days)',\
+                                                                        'τ_dec(days)', 'Δt_dec(days)','σ_τ,dec(days)','τ_exp,dec(days)',\
+                                                                            'δ','R_min(km,10^8 Ms)', 'R(km,10^8 Ms)', 'R_max(km,10^8 Ms)',\
+                                                                                'Rs_min (10^8 Ms)', 'Rs (10^8 Ms)', 'Rs_max (10^8 Ms)',\
+                                                                                    'χ^2','dof','χ^2/dof']
+
 
         
         writer = csv.writer(lc_data)
@@ -256,7 +345,7 @@ def chisquare_per_dof(observed,expected,error):
     return(test_statistic, dof, test_statistic/dof)
 
 
-def shortest_timescale(rootdir, target, uninterp_df, sectbysect = False, sectors = ''): 
+def shortest_timescale(rootdir, target, uninterp_df, z, sectbysect = False, sectors = ''): 
     '''
     Find shortest timescale for exponential rise and decay for significant flux change
     with decreasing iterative kernel smoothing. Smoothing aid in the reduction of single
@@ -266,7 +355,7 @@ def shortest_timescale(rootdir, target, uninterp_df, sectbysect = False, sectors
          rootdir (directory)          - The directory in which lcs are stored
          target (string)              - Name of desired object to analyze
          uninterp_df (DataFrame)      - Number of lcs (default = 501)
-         redshift (float)             - Redshift of AGN
+         z (float)                    - redshift
          sectbysect (boolean)         - sector by sector analysis or not (default is False)
          secors (string)              - current sectors under analysis if sectbysect is True
          
@@ -282,7 +371,8 @@ def shortest_timescale(rootdir, target, uninterp_df, sectbysect = False, sectors
     '''
     
     nonzeroflux = np.nonzero(np.array(uninterp_df[1]))[0]
-    time = np.array(uninterp_df[0][nonzeroflux])
+    time = np.divide(np.array(uninterp_df[0][nonzeroflux]),1.+z)
+    print("adjusting time with redshift z = %.3f"%z)
     unfiltered_flux = np.array(uninterp_df[1][nonzeroflux])
     flux = []
     err = np.array(uninterp_df[2][nonzeroflux])
@@ -290,22 +380,41 @@ def shortest_timescale(rootdir, target, uninterp_df, sectbysect = False, sectors
     tau_dec_min = np.inf
     tau_inc_min = np.inf
     
+    err_tau_dec = 0.
+    err_tau_inc = 0.
+    
     delt_dec_min = 0.
     delt_inc_min = 0.
+    timescale_dec_min = 0.
+    timescale_inc_min = 0.
     
-    t1_dec_idx = 0
+    t1_dec = 0
+    f1_dec = 0
+    e1_dec = 0
     t2_dec = 0
-    t1_inc_idx = 0
+    f2_dec = 0
+    e2_dec = 0
+    
+    t1_inc = 0
+    f1_inc = 0
+    e1_inc = 0
     t2_inc = 0
+    f2_inc = 0
+    e2_inc = 0
     
     FWHM = 2
-
+    
+    long_time  = float(time[-1] - time[0])
+    print("Full light curve length %.2f days"%long_time)
+    less_than_time = True
+    
     while tau_dec_min == np.inf or tau_inc_min == np.inf:
         print("\nSmoothing light curve with FWHM = %i"%FWHM)
-        flux = gaussian_filter(unfiltered_flux,sigma=FWHM)
+        flux = np.array(gaussian_filter(unfiltered_flux,sigma=FWHM))
         for i in range(0,len(time)-1):
             tmp_time = time[i]
             tmp_flux = flux[i]
+            tmp_rflux = unfiltered_flux[i]
             tmp_err = err[i]
 
             if i%500 == 0.:
@@ -314,103 +423,167 @@ def shortest_timescale(rootdir, target, uninterp_df, sectbysect = False, sectors
             delt = np.subtract(time[i+1:],tmp_time)
             delf = np.subtract(flux[i+1:],tmp_flux)
 
-            denom = np.log(np.divide(flux[i+1:],tmp_flux))
-            tau = np.log(2)*np.abs(np.divide(delt,denom))
+            denom = np.log(np.divide(unfiltered_flux[i+1:],tmp_rflux))
+            timescale = np.abs(np.divide(delt,denom))
+            tau = np.log(2)*timescale
 
-            stats = np.column_stack((delt,delf,tau))
+            stats = np.column_stack((delt,delf,tau,timescale))
 
-            delt_dec = [x for x,y,z in stats if x != 0. and y < -3.*tmp_err and np.isfinite(z)]
-            tau_dec = [z for x,y,z in stats if x != 0. and y < -3.*tmp_err and np.isfinite(z)]
-            delt_inc = [x for x,y,z in stats if x != 0. and y > 3.*tmp_err and np.isfinite(z)]
-            tau_inc = [z for x,y,z in stats if x != 0. and y > 3.*tmp_err and np.isfinite(z)]
+            delt_dec = [w for w,x,y,z in stats if w != 0. and x < -3.*tmp_err and np.isfinite(y)]
+            delf_dec = [x for w,x,y,z in stats if w != 0. and x < -3.*tmp_err and np.isfinite(y)]
+            tau_dec = [y for w,x,y,z in stats if w != 0. and x < -3.*tmp_err and np.isfinite(y)]
+            timescale_dec = [z for w,x,y,z in stats if w != 0. and x < -3.*tmp_err and np.isfinite(y)]
+            delt_inc = [w for w,x,y,z in stats if w != 0. and x > 3.*tmp_err and np.isfinite(y)]
+            delf_inc = [x  for w,x,y,z in stats if w != 0. and x > 3.*tmp_err and np.isfinite(y)]
+            tau_inc = [y  for w,x,y,z in stats if w != 0. and x > 3.*tmp_err and np.isfinite(y)]
+            timescale_inc = [z for w,x,y,z in stats if w != 0. and x > 3.*tmp_err and np.isfinite(y)]
 
 
             if len(tau_dec) != 0:
-                if np.min(tau_dec) < tau_dec_min:
-                    tau_dec_min = np.min(tau_dec)
+                if np.nanmin(tau_dec) < tau_dec_min:
+                    tau_dec_min = np.nanmin(tau_dec)
                     delt_dec_min = delt_dec[np.argmin(tau_dec)]
-                    t1_dec_idx = i
-                    t2_dec = time[t1_dec_idx] + delt_dec_min 
+                    timescale_dec_min = timescale_dec[np.argmin(tau_dec)]
+                    
+                    t1_dec = tmp_time
+                    f1_dec = tmp_rflux
+                    e1_dec = tmp_err
+                    t2_idx = np.where(time == t1_dec+delt_dec_min)[0][0]
+                    t2_dec = time[t2_idx]
+                    f2_dec = unfiltered_flux[t2_idx]
+                    e2_dec =  err[t2_idx]
+                        
+                    err_tau_dec = np.abs(np.divide(tau_dec_min,np.log(f2_dec/f1_dec))*((e1_dec/f1_dec)**2 + (e2_dec/f2_dec)**2))
 
             if len(tau_inc) != 0:
-                if np.min(tau_inc) < tau_inc_min:
-                    tau_inc_min = np.min(tau_inc)
+                if np.nanmin(tau_inc) < tau_inc_min:
+                    tau_inc_min = np.nanmin(tau_inc)
                     delt_inc_min = delt_inc[np.argmin(tau_inc)]
-                    t1_inc_idx = i
-                    t2_inc = time[t1_inc_idx] + delt_inc_min
+                    timescale_inc_min = timescale_inc[np.argmin(tau_inc)]
+                        
+                    t1_inc = tmp_time
+                    f1_inc = tmp_rflux
+                    e1_inc = tmp_err
+                    t2_idx = np.where(time == t1_inc+delt_inc_min)[0][0]
+                    t2_inc = time[t2_idx]
+                    f2_inc = unfiltered_flux[t2_idx]
+                    e2_inc = err[t2_idx]
+                    
+                    err_tau_inc = np.abs(np.divide(tau_inc_min,np.log(f2_inc/f1_inc))*((e1_inc/f1_inc)**2 + (e2_inc/f2_inc)**2))
 
+
+        print("tau_inc = %.2f days; tau_dec = %.2f days\n"%(tau_inc_min,tau_dec_min))
+        if (less_than_time) & (FWHM != 0) & (tau_inc_min > long_time or tau_dec_min > long_time):
+            tau_inc_min = np.inf 
+            tau_dec_min = np.inf
+            
         if tau_inc_min != np.inf and tau_dec_min != np.inf:
             break
         elif FWHM == 0:
             if tau_inc_min == np.inf or tau_dec_min == np.inf:
-                break
+                FWHM = 2
+                less_than_time = False
+                continue
+        
         FWHM-=1
                     
     plt.figure(figsize=(25,6))
-    plt.title(target+": shortest timescales of exponential growth and decay")
+    plt.title(target+": shortest timescales of variability, increasing and decreasing flux")
     plt.errorbar(time,unfiltered_flux,yerr=err, color = 'k', alpha = 0.75, linestyle = 'None')
-    plt.vlines((time[t1_dec_idx],t2_dec), np.min(flux)-6, np.max(flux)+6,color = 'r', label = r"$τ_{dec}$ = %.3f"%tau_dec_min)
-    plt.vlines((time[t1_inc_idx],t2_inc), np.min(flux)-6, np.max(flux)+6,color = 'b', label = r"$τ_{inc}$ = %.3f"%tau_inc_min)
+    plt.vlines((t1_dec,t2_dec), np.nanmin(flux)-6, np.nanmax(flux)+6,color = 'r', label = r"$τ_{dec}$ = %.3f"%tau_dec_min)
+    plt.vlines((t1_inc,t2_inc), np.nanmin(flux)-6, np.nanmax(flux)+6,color = 'b', label = r"$τ_{inc}$ = %.3f"%tau_inc_min)
+    
     if FWHM == 0:
         plt.plot(time,flux, label = 'Running average')
     else:
         plt.plot(time,flux, label = r'Smoothed lc $\sigma$=%i'%FWHM)
-    plt.ylim(np.min(flux)-5, np.max(flux)+5)
+    plt.ylim(np.nanmin(flux)-5, np.nanmax(flux)+5)
     plt.legend(loc = 'best')
     plt.tight_layout()
     if sectbysect == True:
-        plt.savefig(rootdir+target+'/'+target+'_sectors'+sectors+'_shortest_timescales_smoothedlc.png')
+        plt.savefig(rootdir+target+'/exponential_rise&decay_timescales/'+target+'_sectors'+sectors+'_shortest_timescales_smoothedlc.png')
     else:
-        plt.savefig(rootdir+target+'/'+target+'_shortest_timescales_smoothedlc.png')
+        plt.savefig(rootdir+target+'/exponential_rise&decay_timescales/'+target+'_shortest_timescales_smoothedlc.png')
 #         plt.show()
     plt.close()
 
     plt.figure(figsize=(10,6))
-    plt.title(target+": shortest timescale of exponential decay")
+    plt.title(target+": shortest timescales of variability, increasing and decreasing flux")
     plt.errorbar(time,unfiltered_flux,yerr=err, color = 'k', alpha = 0.75, linestyle = 'None')
-    plt.vlines((time[t1_dec_idx],t2_dec), np.min(flux)-6, np.max(flux)+6,color = 'r', label = r"$τ_{dec}$ = %.3f"%tau_dec_min)
+    plt.vlines((t1_dec,t2_dec), np.nanmin(flux)-6, np.nanmax(flux)+6,color = 'r', label = r"$τ_{dec}$ = %.3f"%tau_dec_min)
+    
     if FWHM == 0:
         plt.plot(time,flux, label = 'Running average')
     else:
         plt.plot(time,flux, label = r'Smoothed lc $\sigma$=%i'%FWHM)
-    plt.xlim(time[t1_dec_idx]-0.5,t2_dec+0.5)
-    plt.ylim(np.min(flux)-5, np.max(flux)+5)
+    plt.xlim(t1_dec-0.5,t2_dec+0.5)
+    plt.ylim(np.nanmin(flux)-5, np.nanmax(flux)+5)
     plt.legend(loc = 'best')
     plt.tight_layout()
     if sectbysect == True:
-        plt.savefig(rootdir+target+'/'+target+'_sectors'+sectors+'_shortest_decaytimescale_smoothedlc.png')
+        plt.savefig(rootdir+target+'/exponential_rise&decay_timescales/'+target+'_sectors'+sectors+'_shortest_decaytimescale_smoothedlc.png')
     else:
-        plt.savefig(rootdir+target+'/'+target+'_shortest_decaytimescale_smoothedlc.png')
+        plt.savefig(rootdir+target+'/exponential_rise&decay_timescales/'+target+'_shortest_decaytimescale_smoothedlc.png')
 #         plt.show()
     plt.close()
 
     plt.figure(figsize=(10,6))
-    plt.title(target+": shortest timescale of exponential growth")
+    plt.title(target+": shortest timescales of variability, increasing and decreasing flux")
     plt.errorbar(time,unfiltered_flux,yerr=err, color = 'k', alpha = 0.75, linestyle = 'None')
-    plt.vlines((time[t1_inc_idx],t2_inc), np.min(flux)-6, np.max(flux)+6,color = 'b', label = r"$τ_{inc}$ = %.3f"%tau_inc_min)
+    plt.vlines((t1_inc,t2_inc), np.nanmin(flux)-6, np.nanmax(flux)+6,color = 'b', label = r"$τ_{inc}$ = %.3f"%tau_inc_min)
     if FWHM == 0:
         plt.plot(time,flux, label = 'Running average')
     else:
         plt.plot(time,flux, label = r'Smoothed lc $\sigma$=%i'%FWHM)
-    plt.xlim(time[t1_inc_idx]-0.5,t2_inc+0.5)
-    plt.ylim(np.min(flux)-5, np.max(flux)+5)
+    plt.xlim(t1_inc-0.5,t2_inc+0.5)
+    plt.ylim(np.nanmin(flux)-5, np.nanmax(flux)+5)
     plt.legend(loc = 'best')
     plt.tight_layout()
     if sectbysect == True:
-        plt.savefig(rootdir+target+'/'+target+'_sectors'+sectors+'_shortest_growthtimescale_smoothedlc.png')
+        plt.savefig(rootdir+target+'/exponential_rise&decay_timescales/'+target+'_sectors'+sectors+'_shortest_growthtimescale_smoothedlc.png')
     else:
-        plt.savefig(rootdir+target+'/'+target+'_shortest_growthtimescale_smoothedlc.png')
+        plt.savefig(rootdir+target+'/exponential_rise&decay_timescales/'+target+'_shortest_growthtimescale_smoothedlc.png')
 #         plt.show()
     plt.close()
     
     
-    return(tau_dec_min, delt_dec_min, tau_inc_min, delt_inc_min)
+    return(tau_dec_min, delt_dec_min, err_tau_dec, timescale_dec_min, tau_inc_min, delt_inc_min, err_tau_inc, timescale_inc_min)
 
 ###########################################################################################################
-
-def excess_variance(time, flux, err, stdev = 0, len_lc = 0, MSE = 0, total=True, normalize = True):
+def rms_variance(flux,err):
     '''
-    Find sExcess variance and fractional variance for either the entire light curve or within user-
+    inputs:
+         flux (array)             - array of flux from the light curve (or segment)
+         err (array)              - array of error from the light curve (or segment)
+         mean (float)             - mean of entire flux sample
+         
+    outputs:
+        sig2_rms (float)          - Fractional variability amplitude
+    '''
+    
+    len_flux = len(flux)
+
+    mean_flux = np.nanmean(flux)
+    mean_err = np.nanmean(err)
+    err_err = np.sqrt(np.nanvar(err))
+
+    rms_scatter = np.sqrt(np.nanvar(flux,ddof = 1))
+    rms_scatter_err = np.divide(rms_scatter,np.sqrt(2*len_flux - 2))
+    
+    if rms_scatter**2 < mean_err**2:
+        return(0.,0.)
+    
+    else:
+        sig2_rms = np.sqrt(np.subtract(rms_scatter**2,mean_err**2))
+        sig2_rms_err = np.multiply((1./sig2_rms),np.sqrt((rms_scatter*rms_scatter_err)**2 + (mean_err*err_err)**2 ))
+
+        return(sig2_rms,sig2_rms_err)
+
+
+
+def excess_variance(time, flux, err, flux_mean = 0, stdev = 0, len_lc = 0, MSE = 0, total=True, normalize = True):
+    '''
+    Find excess variance and fractional variance for either the entire light curve or within user-
     specified bins
     
     inputs:
@@ -444,12 +617,10 @@ def excess_variance(time, flux, err, stdev = 0, len_lc = 0, MSE = 0, total=True,
     err = np.array(err[nonzeroflux])
     
     if total == True:
-        lc_stdev = np.nanstd(flux)
-        flux_mean = np.nanmean(flux)
 
         len_lc = len(time)
         MSE = np.nanmean(err**2)
-        Xvar = lc_stdev**2 - MSE
+        Xvar = stdev**2 - MSE
         
         if normalize == True:
             NXvar = Xvar/flux_mean**2
@@ -466,8 +637,21 @@ def excess_variance(time, flux, err, stdev = 0, len_lc = 0, MSE = 0, total=True,
             
         NXvarErr = np.array(NXvarErr)        
         FvarErr = NXvarErr/(2*Fvar)
-    
-        return(NXvar, Fvar, NXvarErr, FvarErr)
+        
+        try:
+            for i in range(0,len(NXvar)):
+                if NXvar[i] < 0.:
+                    NXvar[i] = 0.
+                    Fvar[i] = 0.
+                    NXvarErr[i] = 0.
+                    FvarErr[i] = 0.
+            return(NXvar,Fvar, NXvarErr, FvarErr)
+
+        except:
+            if NXvar < 0:
+                return(0.,0.,0.,0.)
+            else:
+                return(NXvar, Fvar, NXvarErr, FvarErr)
     
     else:
         
@@ -484,7 +668,20 @@ def excess_variance(time, flux, err, stdev = 0, len_lc = 0, MSE = 0, total=True,
         XvarErr = np.array(XvarErr)        
         FvarErr = XvarErr/(2*Fvar)
     
-        return(Xvar, Fvar, XvarErr, FvarErr)     
+        try:
+            for i in range(0,len(Xvar)):
+                if Xvar[i] < 0.:
+                    Xvar[i] = 0.
+                    Fvar[i] = 0.
+                    XvarErr[i] = 0.
+                    FvarErr[i] = 0.
+            return(Xvar,Fvar, XvarErr, FvarErr)
+
+        except:
+            if Xvar < 0:
+                return(0.,0.,0.,0.)
+            else:
+                return(Xvar, Fvar, XvarErr, FvarErr)     
             
 ###########################################################################################################################################
         
@@ -533,7 +730,8 @@ def plot_excess_variance(subdir, df, binneddf, Xvar, XvarErr, Xvar_mean, Fvar, F
 
 
     ax2 = fig.add_subplot(gs[2, :],sharex=ax1)
-    ax2.errorbar(binneddf[0], Xvar, yerr = binneddf[1]*XvarErr, linestyle ="None", fmt='+', markersize = 4, color = 'k')
+    ax2.errorbar(binneddf[0], Xvar, yerr = binneddf[1]*XvarErr, linestyle ="None", fmt='+', markersize = 5, color = 'k')
+    ax2.axhline(Xvar_mean, color = 'k', linestyle = 'solid', label = r'$\langle σ_{XS}^{2} \rangle$ = %.2e'%Xvar_mean)
     
     try:
         try:
@@ -542,28 +740,31 @@ def plot_excess_variance(subdir, df, binneddf, Xvar, XvarErr, Xvar_mean, Fvar, F
             CI_Xvar = st.rv_discrete(a = -np.inf,values=(unique, pk))  
         except:
             CI_Xvar = st.rv_discrete(a = -np.inf,values=(Xvar, np.array(len(Xvar)*[1/len(Xvar)])))                       
-        ax2.fill_between([binneddf[0].min()-1, binneddf[0].max()+1], CI_Xvar.interval(0.68)[0], CI_Xvar.interval(0.68)[1], color = 'g', alpha = 0.5)
-        ax2.fill_between([binneddf[0].min()-1, binneddf[0].max()+1], CI_Xvar.interval(0.95)[0], CI_Xvar.interval(0.95)[1], color = 'g', alpha = 0.5)
+        ax2.fill_between([binneddf[0].min()-1, np.nanmax(binneddf[0])+1], CI_Xvar.interval(0.68)[0], CI_Xvar.interval(0.68)[1], color = 'g', alpha = 0.5)
+        ax2.fill_between([binneddf[0].min()-1, np.nanmax(binneddf[0])+1], CI_Xvar.interval(0.95)[0], CI_Xvar.interval(0.95)[1], color = 'g', alpha = 0.5)
 
     except:
-        CI68_Xvar = st.norm.interval(alpha=0.68, loc= Xvar_mean, scale=np.std(Xvar))
-        CI95_Xvar = st.norm.interval(alpha=0.95, loc= Xvar_mean, scale=np.std(Xvar))
-        ax2.fill_between([binneddf[0].min()-1, binneddf[0].max()+1], CI68_Xvar[0], CI68_Xvar[1], color = 'g', alpha = 0.5)
-        ax2.fill_between([binneddf[0].min()-1, binneddf[0].max()+1], CI95_Xvar[0], CI95_Xvar[1], color = 'g', alpha = 0.5)
+        CI68_Xvar = st.norm.interval(alpha=0.68, loc= Xvar_mean, scale=np.nanstd(Xvar))
+        CI95_Xvar = st.norm.interval(alpha=0.95, loc= Xvar_mean, scale=np.nanstd(Xvar))
+        ax2.fill_between([binneddf[0].min()-1, np.nanmax(binneddf[0])+1], CI68_Xvar[0], CI68_Xvar[1], color = 'g', alpha = 0.5)
+        ax2.fill_between([binneddf[0].min()-1, np.nanmax(binneddf[0])+1], CI95_Xvar[0], CI95_Xvar[1], color = 'g', alpha = 0.5)
 
     ax2.set_ylabel(r"$σ_{XS}^{2}$")
     ax2.minorticks_on()
     ax2.tick_params(axis='x', which = 'major', top = True, direction= 'in', length = 8)
     ax2.tick_params(axis='x', which = 'minor', top = True, direction= 'in', length = 4)
+    ax2.legend(loc = 'upper right')
 
 
     ax3 = fig.add_subplot(gs[3, :],sharex=ax2)
     ax3.errorbar(binneddf[0], Fvar, yerr= FvarErr, linestyle ="None", color = 'k')
+    ax3.axhline(Fvar_mean, color = 'k', linestyle = 'solid', label = r'$\langle F_{var} \rangle$ = %.2e'%Fvar_mean)
     ax3.set_ylabel(r"$F_{var}$")
     ax3.minorticks_on()
     ax3.tick_params(axis='x', which = 'major', top = True, direction= 'in', length = 8)
     ax3.tick_params(axis='x', which = 'minor', top = True, direction= 'in', length = 4)
     ax3.set_xlabel('Time (BTJD - days)')
+    ax3.legend(loc = 'upper right')
     
     Fvar_finite = [x for x in Fvar if np.isfinite(x)]
     try:
@@ -573,17 +774,21 @@ def plot_excess_variance(subdir, df, binneddf, Xvar, XvarErr, Xvar_mean, Fvar, F
             CI_Fvar = st.rv_discrete(a = -np.inf,values=(unique, pk))  
         except:
             CI_Fvar = st.rv_discrete(a = -np.inf,values=(Fvar_finite,np.array(len(Fvar_finite)*[1/len(Fvar_finite)])))
-        ax3.fill_between([binneddf[0].min()-1,binneddf[0].max()+1], CI_Fvar.interval(0.68)[0], CI_Fvar.interval(0.68)[1], color = 'g', alpha = 0.5)
-        ax3.fill_between([binneddf[0].min()-1,binneddf[0].max()+1], CI_Fvar.interval(0.95)[0], CI_Fvar.interval(0.95)[1], color = 'g', alpha = 0.5)
+        ax3.fill_between([binneddf[0].min()-1,np.nanmax(binneddf[0])+1], CI_Fvar.interval(0.68)[0], CI_Fvar.interval(0.68)[1], color = 'g', alpha = 0.5)
+        ax3.fill_between([binneddf[0].min()-1,np.nanmax(binneddf[0])+1], CI_Fvar.interval(0.95)[0], CI_Fvar.interval(0.95)[1], color = 'g', alpha = 0.5)
 
     except:
-        CI68_Fvar = st.norm.interval(alpha=0.68, loc= Fvar_mean, scale=np.std(Fvar))
-        CI95_Fvar = st.norm.interval(alpha=0.95, loc= Fvar_mean, scale=np.std(Fvar))
-        ax3.fill_between([binneddf[0].min()-1,binneddf[0].max()+1], CI68_Fvar[0], CI68_Fvar[1], color = 'g', alpha = 0.5)
-        ax3.fill_between([binneddf[0].min()-1,binneddf[0].max()+1], CI95_Fvar[0], CI95_Fvar[1], color = 'g', alpha = 0.5)
+        CI68_Fvar = st.norm.interval(alpha=0.68, loc= Fvar_mean, scale=np.nanstd(Fvar))
+        CI95_Fvar = st.norm.interval(alpha=0.95, loc= Fvar_mean, scale=np.nanstd(Fvar))
+        ax3.fill_between([binneddf[0].min()-1,np.nanmax(binneddf[0])+1], CI68_Fvar[0], CI68_Fvar[1], color = 'g', alpha = 0.5)
+        ax3.fill_between([binneddf[0].min()-1,np.nanmax(binneddf[0])+1], CI95_Fvar[0], CI95_Fvar[1], color = 'g', alpha = 0.5)
 
 
-    plt.savefig(subdir+'/'+target+'_excess_rms_variance_'+bin_time+'hr.pdf', format = 'pdf',bbox_inches='tight')
+    if sectbysect == True:
+        plt.savefig(subdir+'/excess_variance/'+target+'_excess_rms_variance_'+bin_time+'hr_sectors'+group+'.pdf', format = 'pdf',bbox_inches='tight')
+    else:
+        plt.savefig(subdir+'/excess_variance/'+target+'_excess_rms_variance_'+bin_time+'hr.pdf', format = 'pdf',bbox_inches='tight')
+#     plt.savefig(subdir+'/'+target+'_excess_rms_variance_'+bin_time+'hr.png', format = 'png',bbox_inches='tight',dpi=1200)
     #             plt.show()
     plt.close()
 
@@ -606,14 +811,14 @@ def plot_excess_variance(subdir, df, binneddf, Xvar, XvarErr, Xvar_mean, Fvar, F
                 CI_Xvar = st.rv_discrete(a = -np.inf,values=(unique, pk))  
             except:
                 CI_Xvar = st.rv_discrete(a = -np.inf,values=(Xvar, np.array(len(Xvar)*[1/len(Xvar)])))                       
-            ax2.fill_between([binneddf[0].min()-1, binneddf[0].max()+1], CI_Xvar.interval(0.68)[0], CI_Xvar.interval(0.68)[1], color = 'g', alpha = 0.5)
-            ax2.fill_between([binneddf[0].min()-1, binneddf[0].max()+1], CI_Xvar.interval(0.95)[0], CI_Xvar.interval(0.95)[1], color = 'g', alpha = 0.5)
+            ax2.fill_between([binneddf[0].min()-1, np.nanmax(binneddf[0])+1], CI_Xvar.interval(0.68)[0], CI_Xvar.interval(0.68)[1], color = 'g', alpha = 0.5)
+            ax2.fill_between([binneddf[0].min()-1, np.nanmax(binneddf[0])+1], CI_Xvar.interval(0.95)[0], CI_Xvar.interval(0.95)[1], color = 'g', alpha = 0.5)
 
         except:
-            CI68_Xvar = st.norm.interval(alpha=0.68, loc= Xvar_mean, scale=np.std(Xvar))
-            CI95_Xvar = st.norm.interval(alpha=0.95, loc= Xvar_mean, scale=np.std(Xvar))
-            ax2.fill_between([binneddf[0].min()-1, binneddf[0].max()+1], CI68_Xvar[0], CI68_Xvar[1], color = 'g', alpha = 0.5)
-            ax2.fill_between([binneddf[0].min()-1, binneddf[0].max()+1], CI95_Xvar[0], CI95_Xvar[1], color = 'g', alpha = 0.5)
+            CI68_Xvar = st.norm.interval(alpha=0.68, loc= Xvar_mean, scale=np.nanstd(Xvar))
+            CI95_Xvar = st.norm.interval(alpha=0.95, loc= Xvar_mean, scale=np.nanstd(Xvar))
+            ax2.fill_between([binneddf[0].min()-1, np.nanmax(binneddf[0])+1], CI68_Xvar[0], CI68_Xvar[1], color = 'g', alpha = 0.5)
+            ax2.fill_between([binneddf[0].min()-1, np.nanmax(binneddf[0])+1], CI95_Xvar[0], CI95_Xvar[1], color = 'g', alpha = 0.5)
 
 
         ax2.set_ylabel(r"$σ_{XS}^{2}$")
@@ -636,28 +841,28 @@ def plot_excess_variance(subdir, df, binneddf, Xvar, XvarErr, Xvar_mean, Fvar, F
                 CI_Fvar = st.rv_discrete(a = -np.inf,values=(unique, pk))  
             except:
                 CI_Fvar = st.rv_discrete(a = -np.inf,values=(Fvar_finite,np.array(len(Fvar_finite)*[1/len(Fvar_finite)])))
-            ax3.fill_between([binneddf[0].min()-1,binneddf[0].max()+1], CI_Fvar.interval(0.68)[0], CI_Fvar.interval(0.68)[1], color = 'g', alpha = 0.5)
-            ax3.fill_between([binneddf[0].min()-1,binneddf[0].max()+1], CI_Fvar.interval(0.95)[0], CI_Fvar.interval(0.95)[1], color = 'g', alpha = 0.5)
+            ax3.fill_between([binneddf[0].min()-1,np.nanmax(binneddf[0])+1], CI_Fvar.interval(0.68)[0], CI_Fvar.interval(0.68)[1], color = 'g', alpha = 0.5)
+            ax3.fill_between([binneddf[0].min()-1,np.nanmax(binneddf[0])+1], CI_Fvar.interval(0.95)[0], CI_Fvar.interval(0.95)[1], color = 'g', alpha = 0.5)
 
         except:
-            CI68_Fvar = st.norm.interval(alpha=0.68, loc= Fvar_mean, scale=np.std(Fvar))
-            CI95_Fvar = st.norm.interval(alpha=0.95, loc= Fvar_mean, scale=np.std(Fvar))
-            ax3.fill_between([binneddf[0].min()-1,binneddf[0].max()+1], CI68_Fvar[0], CI68_Fvar[1], color = 'g', alpha = 0.5)
-            ax3.fill_between([binneddf[0].min()-1,binneddf[0].max()+1], CI95_Fvar[0], CI95_Fvar[1], color = 'g', alpha = 0.5)
+            CI68_Fvar = st.norm.interval(alpha=0.68, loc= Fvar_mean, scale=np.nanstd(Fvar))
+            CI95_Fvar = st.norm.interval(alpha=0.95, loc= Fvar_mean, scale=np.nanstd(Fvar))
+            ax3.fill_between([binneddf[0].min()-1,np.nanmax(binneddf[0])+1], CI68_Fvar[0], CI68_Fvar[1], color = 'g', alpha = 0.5)
+            ax3.fill_between([binneddf[0].min()-1,np.nanmax(binneddf[0])+1], CI95_Fvar[0], CI95_Fvar[1], color = 'g', alpha = 0.5)
 
 
         ax3.set_ylabel(r"$F_{var}$")
         ax3.minorticks_on()
         ax3.tick_params(axis='x', which = 'major', top = True, direction= 'in', length = 8)
         ax3.tick_params(axis='x', which = 'minor', top = True, direction= 'in', length = 4)
-        ax3.set_xlim(xmin = binneddf[0].min()-1, xmax = binneddf[0].max()+1)
+        ax3.set_xlim(xmin = binneddf[0].min()-1, xmax = np.nanmax(binneddf[0])+1)
         ax3.legend(loc = 'upper right')
         ax3.set_xlabel('Time (BTJD - days)')
 
         if sectbysect == True:
-            plt.savefig(subdir+'/'+target+'_excess_rms_varianceCI_'+bin_time+'hr_sectors'+group+'.pdf', format = 'pdf',bbox_inches='tight') 
+            plt.savefig(subdir+'/excess_variance/'+target+'_excess_rms_varianceCI_'+bin_time+'hr_sectors'+group+'.pdf', format = 'pdf',bbox_inches='tight') 
         else:
-            plt.savefig(subdir+'/'+target+'_excess_rms_varianceCI_'+bin_time+'hr.pdf', format = 'pdf',bbox_inches='tight')
+            plt.savefig(subdir+'/excess_variance/'+target+'_excess_rms_varianceCI_'+bin_time+'hr.pdf', format = 'pdf',bbox_inches='tight')
         #                 plt.show()
         plt.close()
 
@@ -675,14 +880,14 @@ def plot_excess_variance(subdir, df, binneddf, Xvar, XvarErr, Xvar_mean, Fvar, F
                     CI_Xvar = st.rv_discrete(a = -np.inf,values=(unique, pk))  
                 except:
                     CI_Xvar = st.rv_discrete(a = -np.inf,values=(Xvar, np.array(len(Xvar)*[1/len(Xvar)])))         
-                plt.fill_between([binneddf[0].min()-1,binneddf[0].max()+1], CI_Xvar.interval(0.68)[0], CI_Xvar.interval(0.68)[1], color = 'g', alpha = 0.5)
-                plt.fill_between([binneddf[0].min()-1,binneddf[0].max()+1], CI_Xvar.interval(0.95)[0], CI_Xvar.interval(0.95)[1], color = 'g', alpha = 0.5)
+                plt.fill_between([binneddf[0].min()-1,np.nanmax(binneddf[0])+1], CI_Xvar.interval(0.68)[0], CI_Xvar.interval(0.68)[1], color = 'g', alpha = 0.5)
+                plt.fill_between([binneddf[0].min()-1,np.nanmax(binneddf[0])+1], CI_Xvar.interval(0.95)[0], CI_Xvar.interval(0.95)[1], color = 'g', alpha = 0.5)
 
             except:
-                CI68_Xvar = st.norm.interval(alpha=0.68, loc= Xvar_mean, scale=np.std(Xvar))                
-                CI95_Xvar = st.norm.interval(alpha=0.95, loc= Xvar_mean, scale=np.std(Xvar))
-                plt.fill_between([binneddf[0].min()-1,binneddf[0].max()+1], CI68_Xvar[0], CI68_Xvar[1], color = 'g', alpha = 0.5)
-                plt.fill_between([binneddf[0].min()-1,binneddf[0].max()+1], CI95_Xvar[0], CI95_Xvar[1], color = 'g', alpha = 0.5)
+                CI68_Xvar = st.norm.interval(alpha=0.68, loc= Xvar_mean, scale=np.nanstd(Xvar))                
+                CI95_Xvar = st.norm.interval(alpha=0.95, loc= Xvar_mean, scale=np.nanstd(Xvar))
+                plt.fill_between([binneddf[0].min()-1,np.nanmax(binneddf[0])+1], CI68_Xvar[0], CI68_Xvar[1], color = 'g', alpha = 0.5)
+                plt.fill_between([binneddf[0].min()-1,np.nanmax(binneddf[0])+1], CI95_Xvar[0], CI95_Xvar[1], color = 'g', alpha = 0.5)
 
             plt.minorticks_on()
             plt.tick_params(axis='x', which = 'major', top = True, direction= 'in', length = 8)
@@ -692,14 +897,14 @@ def plot_excess_variance(subdir, df, binneddf, Xvar, XvarErr, Xvar_mean, Fvar, F
             plt.xlabel('Time (BTJD - days)')
             plt.ylabel(r"$σ_{XS}^{2}$")
 
-            plt.xlim(xmin = binneddf[0].min()-1, xmax = binneddf[0].max()+1)
+            plt.xlim(xmin = binneddf[0].min()-1, xmax = np.nanmax(binneddf[0])+1)
 
             if sectbysect == True:
                 plt.title(target+r': $σ_{XS}^{2}$, '+bin_time+'hr bins sectors '+group,fontsize='x-large')
-                plt.savefig(subdir+'/'+target+'_excess_rms_varianceCI_'+bin_time+'hr_sectors'+group+'.pdf', format = 'pdf',bbox_inches='tight') 
+                plt.savefig(subdir+'/excess_variance/'+target+'_excess_rms_varianceCI_'+bin_time+'hr_sectors'+group+'.pdf', format = 'pdf',bbox_inches='tight') 
             else:
                 plt.title(target+r': $σ_{XS}^{2}$, '+bin_time+'hr bins',fontsize='x-large')
-                plt.savefig(subdir+'/'+target+'_excess_rms_varianceCI_'+bin_time+'hr.pdf', format = 'pdf',bbox_inches='tight')
+                plt.savefig(subdir+'/excess_variance/'+target+'_excess_rms_varianceCI_'+bin_time+'hr.pdf', format = 'pdf',bbox_inches='tight')
 
         #                     plt.show()
             plt.close()
@@ -794,11 +999,11 @@ def interpolate_data(target, df, pcm, directory):
     interp_df = interp_df.dropna()
     
     if pcm == 1: 
-        interp_df.to_csv(directory+'/'+target+'_cycle1_PCA_interpolated_lc.dat',sep = ' ',header = False, index = False)
+        interp_df.to_csv(directory+'/lightcurve_datafiles/'+target+'_cycle1_PCA_interpolated_lc.dat',sep = ' ',header = False, index = False)
     if pcm == 2: 
-        interp_df.to_csv(directory+'/'+target+'_cycle1_simple_hybrid_interpolated_lc.dat',sep = ' ',header = False, index = False)
+        interp_df.to_csv(directory+'/lightcurve_datafiles/'+target+'_cycle1_simple_hybrid_interpolated_lc.dat',sep = ' ',header = False, index = False)
     if pcm == 3: 
-        interp_df.to_csv(directory+'/'+target+'_cycle1_full_hybrid_interpolated_lc.dat',sep = ' ',header = False, index = False)
+        interp_df.to_csv(directory+'/lightcurve_datafiles/'+target+'_cycle1_full_hybrid_interpolated_lc.dat',sep = ' ',header = False, index = False)
 
     
     return(interp_df)
@@ -824,7 +1029,7 @@ def bin_error(n, bins, flux):
 
     for i in range(0,len(n)):
         bin_flux = [x for x in flux if x >= bins[i] and x < bins[i+1]]
-        bin_err[i] = np.std(bin_flux)/np.sqrt(n[i])
+        bin_err[i] = np.nanstd(bin_flux)/np.sqrt(n[i])
         
     return(bin_err)
 
@@ -871,6 +1076,12 @@ def rebinning(df,bin1,bin2):
     binMSE_bin1 = []
     binMSE_bin2 = []
     
+    binRMS_bin1 = []
+    binRMS_bin2 = []
+    
+    binRMSerr_bin1 = []
+    binRMSerr_bin2 = []
+    
 
     for j in range(0,2):
         tmp_time = time[0]
@@ -882,7 +1093,7 @@ def rebinning(df,bin1,bin2):
         
         for i in range(1,len(time)):
                  
-            if j == 0 and (time[i] - tmp_time) >= np.round((bin1*0.04166667),4): 
+            if j == 0 and (time[i] - tmp_time) >= np.round((bin1/24.),4): 
                 
                 temp_bin = np.column_stack((fbin,ebin))
                 
@@ -893,6 +1104,10 @@ def rebinning(df,bin1,bin2):
                 binerr_bin1.append(np.sqrt(np.nansum([y**2 for x,y in temp_bin if y != 0.0]))/N)
                 binstd_bin1.append(np.nanstd([x for x,y in temp_bin if y != 0.0], ddof = 1))
                 binMSE_bin1.append(np.nanmean([y**2 for x,y in temp_bin if y != 0.0]))
+                RMS, RMSerr = rms_variance(np.array([x for x,y in temp_bin if y != 0.0],dtype = float),\
+                                           np.array([y for x,y in temp_bin if y != 0.0],dtype = float))
+                binRMS_bin1.append(RMS)
+                binRMSerr_bin1.append(RMSerr)
                 
                 
                 tmp_time = time[i]
@@ -901,7 +1116,7 @@ def rebinning(df,bin1,bin2):
                 ebin = [err[i]]
                                 
                  
-            elif j == 1 and (time[i] - tmp_time) >= np.round((bin2*0.04166667),4): 
+            elif j == 1 and (time[i] - tmp_time) >= np.round((bin2/24.),4): 
                 
                 temp_bin = np.column_stack((fbin,ebin))
                 
@@ -912,6 +1127,10 @@ def rebinning(df,bin1,bin2):
                 binerr_bin2.append(np.sqrt(np.nansum([y**2 for x,y in temp_bin if y != 0.0]))/N)
                 binstd_bin2.append(np.nanstd([x for x,y in temp_bin if y != 0.0], ddof = 1))
                 binMSE_bin2.append(np.nanmean([y**2 for x,y in temp_bin if y != 0.0]))
+                RMS, RMSerr = rms_variance(np.array([x for x,y in temp_bin if y != 0.0],dtype = float),\
+                                           np.array([y for x,y in temp_bin if y != 0.0],dtype = float))
+                binRMS_bin2.append(RMS)
+                binRMSerr_bin2.append(RMSerr)
                 
                 
                 tmp_time = time[i]
@@ -929,6 +1148,10 @@ def rebinning(df,bin1,bin2):
                     binerr_bin1.append(np.sqrt(np.nansum([y**2 for x,y in temp_bin if y != 0.0]))/N)
                     binstd_bin1.append(np.nanstd([x for x,y in temp_bin if y != 0.0], ddof = 1))
                     binMSE_bin1.append(np.nanmean([y**2 for x,y in temp_bin if y != 0.0]))
+                    RMS, RMSerr = rms_variance(np.array([x for x,y in temp_bin if y != 0.0],dtype = float),\
+                                               np.array([y for x,y in temp_bin if y != 0.0],dtype = float))
+                    binRMS_bin1.append(RMS)
+                    binRMSerr_bin1.append(RMSerr)
                     
                 elif j == 1:
                     time_bin2.append(np.nanmean(tbin))
@@ -938,6 +1161,10 @@ def rebinning(df,bin1,bin2):
                     binerr_bin2.append(np.sqrt(np.nansum([y**2 for x,y in temp_bin if y != 0.0]))/N)
                     binstd_bin2.append(np.nanstd([x for x,y in temp_bin if y != 0.0], ddof = 1))
                     binMSE_bin2.append(np.nanmean([y**2 for x,y in temp_bin if y != 0.0]))
+                    RMS, RMSerr = rms_variance(np.array([x for x,y in temp_bin if y != 0.0],dtype = float),\
+                                               np.array([y for x,y in temp_bin if y != 0.0],dtype = float))
+                    binRMS_bin2.append(RMS)
+                    binRMSerr_bin2.append(RMSerr)
                     
             else:
                 tbin.append(time[i])
@@ -946,8 +1173,8 @@ def rebinning(df,bin1,bin2):
                                 
                         
 
-    binnedflux_bin1 = pd.DataFrame(np.column_stack((time_bin1, binflux_bin1, binerr_bin1, binstd_bin1,binN_bin1,binMSE_bin1)))
-    binnedflux_bin2 = pd.DataFrame(np.column_stack((time_bin2, binflux_bin2, binerr_bin2, binstd_bin2,binN_bin2,binMSE_bin2)))
+    binnedflux_bin1 = pd.DataFrame(np.column_stack((time_bin1,binflux_bin1,binerr_bin1,binstd_bin1,binN_bin1,binMSE_bin1,binRMS_bin1,binRMSerr_bin1)))
+    binnedflux_bin2 = pd.DataFrame(np.column_stack((time_bin2,binflux_bin2,binerr_bin2,binstd_bin2,binN_bin2,binMSE_bin2,binRMS_bin2,binRMSerr_bin2)))
 
     binnedflux_bin1.replace([np.inf ,0.0, -np.inf], np.nan)
     binnedflux_bin2.replace([np.inf, 0.0, -np.inf], np.nan)
@@ -992,8 +1219,8 @@ def lc_stitch(unstitched_lc):
 
         else:
 
-            first_flux = np.mean(f[:10])
-            last_flux = np.mean(full_lc_flux[-10:])
+            first_flux = np.nanmean(f[:10])
+            last_flux = np.nanmean(full_lc_flux[-10:])
 
             scale_factor= first_flux - last_flux
 
@@ -1013,8 +1240,70 @@ def lc_stitch(unstitched_lc):
 
 ###########################################################################################################
 ###########################################################################################################
+def r_squared(flux, rms, params):
+    
+    resid = np.subtract(rms,linear(rms,*params))
+    Sresid = np.sum(resid**2.)
+    Stot = len(rms)*np.nanvar(rms)
+    
+    rsq = 1. - Sresid/Stot
+    
+    if 0.75 <= rsq <= 1.:
+        rsq_sig = True
+    else: 
+        rsq_sig = False
+        
+    return(rsq, rsq_sig)
 
-def lognormal_fit(n, flux, bins, bin_center, bin_err, i, directory, save_tail, bin1, bin2, visual = False):    
+
+def KStest(mean,std,flux, mean2 = 0.,std2 = 0., div= 0., model = "normal"):
+    
+    KS_D = []
+    KS_p = []
+
+    if model == "lognormal":
+        for x in range(0,5000):
+            try:
+                rnd_dist = np.random.lognormal(mean = mean, sigma = std, size = len(flux))
+            except:
+                rnd_dist = np.random.lognormal(mean = mean, sigma = np.abs(std), size = len(flux))
+            KS = st.ks_2samp(flux, rnd_dist)
+            KS_D.append(KS[0])
+            KS_p.append(KS[1])
+    
+    elif model == "bimodal":
+        ϕ = 0.5 + np.arctan(div)/np.pi
+        for x in range(0,5000):
+            try:
+                try:
+                    rnd_distA = np.random.normal(loc = mean, scale = std, size = int(ϕ*len(flux) + 0.5))
+                    rnd_distB = np.random.normal(loc = mean2, scale = std2, size = int((1-ϕ)*len(flux) + 0.5))
+                    rnd_dist = np.concatenate([rnd_distA, rnd_distB], axis = 0)
+                except:
+                    rnd_distA = np.random.normal(loc = mean, scale = np.abs(std), size = int(ϕ*len(flux) + 0.5))
+                    rnd_distB = np.random.normal(loc = mean2, scale = np.abs(std2), size = int((1-ϕ)*len(flux) + 0.5))
+                    rnd_dist = np.concatenate([rnd_distA, rnd_distB], axis = 0)
+            except:
+                rnd_distA = np.random.normal(loc = mean, scale = np.abs(std), size = int(len(flux)/2. + 0.5))
+                rnd_distB = np.random.normal(loc = mean2, scale = np.abs(std2), size = int(len(flux)/2. + 0.5))
+                rnd_dist = np.concatenate([rnd_distA, rnd_distB], axis = 0)
+
+            KS = st.ks_2samp(flux, rnd_dist)
+            KS_D.append(KS[0])
+            KS_p.append(KS[1])
+    
+    else:
+        for x in range(0,5000):
+            rnd_dist = np.random.normal(loc = mean, scale = np.abs(std), size = len(flux))
+            KS = st.ks_2samp(flux, rnd_dist)
+            KS_D.append(KS[0])
+            KS_p.append(KS[1])
+    
+    return([np.nanmean(KS_D),np.nanmean(KS_p)] )
+
+
+
+def lognormal_fit(n, flux, bins, bin_center, bin_err, i, directory, save_tail, bin1, bin2, α = 0.05, visual = False):    
     '''
     Algorithm to fit distribution to lognormal curve
     
@@ -1029,21 +1318,14 @@ def lognormal_fit(n, flux, bins, bin_center, bin_err, i, directory, save_tail, b
         save_tail (string)           - tail of name assigned to file to be saved
         bin1 (string)                - string which specified how many hours for one binning scheme
         bin2 (string)                - string which specified how many hours for one binning scheme)
+        α (float)                    - value between 0 and 1 to set significance of KS test
         visual (boolean)             - should figures be shown
     '''
     
     
-    maxfreq = n.max()
+    maxfreq = np.nanmax(n)
 
-    if len(str(int(bin_center[0] +0.5))) <= 2:
-        tick_labels = [str(np.round(x,decimals=2)) for x in bin_center]
-        
-    elif len(str(int(bin_center[0] + 0.5))) == 3 :
-        tick_labels = [str(np.round(x,decimals=1)) for x in bin_center]
-        
-    else:
-        tick_labels = [str(int(x + 0.5)) for x in bin_center]
-
+    tick_labels = ticklabels(bin_center)
     
     plt.figure(figsize=(12,6))
     
@@ -1053,30 +1335,24 @@ def lognormal_fit(n, flux, bins, bin_center, bin_err, i, directory, save_tail, b
     lognorm_m = op.minimize(Min_PDF, [*init_params], args=(np.array((n,bins),dtype='object'),lognormal), method='L-BFGS-B', options={'gtol':1e-6,'disp':False})
     lognorm_pars = lognorm_m['x']
     
-    plt.bar(bin_center, n, width = 0.8*(bin_center[1]-bin_center[0]), alpha=0.9, color= 'b', align='center',tick_label=tick_labels) # yerr=bin_err, 
+    plt.bar(bin_center, n, width = 0.8*(bin_center[1]-bin_center[0]), align='center',tick_label=tick_labels)
 
        
     logbins = np.linspace(bins[0],bins[-1:],num=500)
     lognorm_fit = st.lognorm.pdf(logbins,shape,loc,scale)
 
-    fit_max = np.max(lognorm_fit)
+    fit_max = np.nanmax(lognorm_fit)
     fit_mean = loc
+
+    c_α = np.sqrt(-np.log(α/2.)/2.)
+    D_crit= c_α*np.sqrt(2./len(flux))
     
-    KS_K = []
-    KS_p = []
-
-#     ϕ = 0.5 + np.arctan(bimod_pars[0])/np.pi
-    for i in range(0,2000):
-        rnd_dist = np.random.lognormal(mean = lognorm_pars[1], sigma = lognorm_pars[2], size = len(flux))
-        KS = st.ks_2samp(flux, rnd_dist)
-        KS_K.append(KS[0])
-        KS_p.append(KS[1])
-
-
-    if KS[1] >= 0.05:
-        plt.plot(logbins,lognorm_fit,color='g',label='lognormal fit\nKS: %.3e; p: %.3e'%(KS[0],KS[1]))
+    KS = KStest(lognorm_pars[1],lognorm_pars[2], flux, model = "lognormal")
+    
+    if KS[0] <= D_crit:
+        plt.plot(logbins,lognorm_fit,color='g',label='lognormal fit\n'+r'$\frac{D}{D_{crit}}$: %.3e; p: %.3e'%(KS[0]/D_crit,KS[1]))
     else:
-        plt.plot(logbins,lognorm_fit,color='r',label='lognormal fit\nKS: %.3e; p: %.3e'%(KS[0],KS[1]))
+        plt.plot(logbins,lognorm_fit,color='r',label='lognormal fit\n'+r'$\frac{D}{D_{crit}}$: %.3e; p: %.3e'%(KS[0]/D_crit,KS[1]))
         
     plt.axvline(fit_mean,color= 'k',linestyle = 'dashed')
 
@@ -1118,7 +1394,7 @@ def lognormal_fit(n, flux, bins, bin_center, bin_err, i, directory, save_tail, b
 
 ###########################################################################################################
 
-def bimodal_fit(n, flux, bins, bin_center, bin_err, i, directory, save_tail, bin1, bin2, visual = False, init_params = None):
+def bimodal_fit(n, flux, bins, bin_center, bin_err, i, directory, save_tail, bin1, bin2, α = 0.05, visual = False, init_params = None):
     '''
     Algorithm to fit distribution to bimodal normal curve
     
@@ -1133,25 +1409,18 @@ def bimodal_fit(n, flux, bins, bin_center, bin_err, i, directory, save_tail, bin
         save_tail (string)           - tail of name assigned to file to be saved
         bin1 (string)                - string which specified how many hours for one binning scheme
         bin2 (string)                - string which specified how many hours for one binning scheme)
+        α (float)                    - value between 0 and 1 to set significance of KS test
         visual (boolean)             - should figures be shown
     '''
     
     flux = sorted(flux)
     
-    if len(str(int(bin_center[0] +0.5))) <= 2:
-        tick_labels = [str(np.round(x,decimals=2)) for x in bin_center]
-        
-    elif len(str(int(bin_center[0] + 0.5))) == 3 :
-        tick_labels = [str(np.round(x,decimals=1)) for x in bin_center]
-        
-    else:
-        tick_labels = [str(int(x + 0.5)) for x in bin_center]
+    tick_labels = ticklabels(bin_center)
 
     plt.figure(figsize=(12,6))
     
-    plt.bar(bin_center,n, width = 0.8*(bin_center[1]-bin_center[0]), alpha=0.9, color= 'b', align='center',tick_label=tick_labels) # yerr=bin_err,
+    plt.bar(bin_center,n, width = 0.85*(bin_center[1]-bin_center[0]), align='center',tick_label=tick_labels)
     
-
 
     if init_params == None:
         loc1, scale1 = st.norm.fit(flux[:roundedfractionalrange(flux, np.divide(2,3))])
@@ -1165,32 +1434,25 @@ def bimodal_fit(n, flux, bins, bin_center, bin_err, i, directory, save_tail, bin
     bimod_m = op.minimize(Min_PDF, [*init_params], args=(np.array((n,bins),dtype='object'),bimodal), method='L-BFGS-B', options={'gtol':1e-6,'disp':False})
     bimod_pars = bimod_m['x']
     
-    fit_flux = np.linspace(bins[0],bins[-1:],num=500) 
-    bimod_fit = bimodal(fit_flux, *bimod_pars)
-    
-    KS_K = []
-    KS_p = []
+    bimodbins = np.linspace(bins[0],bins[-1:],num=500) 
+    bimod_fit = bimodal(bimodbins, *bimod_pars)
 
-#     ϕ = 0.5 + np.arctan(bimod_pars[0])/np.pi
-    for i in range(0,2000):
-        rnd_dist = np.random.normal(loc = bimod_pars[2], scale = bimod_pars[3], size = int(len(flux)/2 + 0.5))
-        rnd_dist = np.random.normal(loc = bimod_pars[5], scale = bimod_pars[6], size = int(len(flux)/2 + 0.5))
-        KS = st.ks_2samp(flux, rnd_dist)
-        KS_K.append(KS[0])
-        KS_p.append(KS[1])
-
-    KS = [np.nanmean(KS_K),np.nanmean(KS_p)]  
+    KS = KStest(bimod_pars[2],bimod_pars[3], flux,\
+                mean2 = bimod_pars[5], std2 = bimod_pars[6], div = bimod_pars[0], model = "bimodal")
     
-    fit_max = np.max(bimodal(fit_flux,*bimod_pars))
-    maxfreq = n.max()
+    fit_max = np.nanmax(bimod_fit)
+    maxfreq = np.nanmax(n)
     
     mu1 = bimod_pars[2]
     mu2 = bimod_pars[5]
     
-    if KS[1] >= 0.05:
-        plt.plot(fit_flux, bimodal(fit_flux,*bimod_pars), color='g', label='bimodal fit\nKS: %.3e; p: %.3e'%(KS[0],KS[1]))
+    c_α = np.sqrt(-np.log(α/2.)/2.)
+    D_crit= c_α*np.sqrt(2./len(flux))
+    
+    if KS[0] <= D_crit:
+        plt.plot(bimodbins,bimod_fit,color='g',label='bimodal fit\n'+r'$\frac{D}{D_{crit}}$: %.3e; p: %.3e'%(KS[0]/D_crit,KS[1]))
     else:
-        plt.plot(fit_flux, bimodal(fit_flux,*bimod_pars), color='r', label='bimodal fit\nKS: %.3e; p: %.3e'%(KS[0],KS[1]))
+        plt.plot(bimodbins,bimod_fit,color='r',label='bimodal fit\n'+r'$\frac{D}{D_{crit}}$: %.3e; p: %.3e'%(KS[0]/D_crit,KS[1]))
         
     plt.axvline(mu1,color= 'k',linestyle = 'dashed', label = '$μ_{1}$')
     plt.axvline(mu2,color= 'k',linestyle = 'dotted', label = '$μ_{2}$')
@@ -1217,12 +1479,12 @@ def bimodal_fit(n, flux, bins, bin_center, bin_err, i, directory, save_tail, bin
         plt.xticks(rotation=90)
 
 
-    if i==2:
+    if i == 2:
         plt.title(bin1+" hr bins")
             
         plt.savefig(directory+'/'+target+'_flux_dist_bimodal_'+bin1+'hr'+save_tail, format = 'pdf',bbox_inches='tight')
 
-    if i==3:
+    if i == 3:
         plt.title(bin2+" hr bins")
             
         plt.savefig(directory+'/'+target+'_flux_dist_bimodal_'+bin2+'hr'+save_tail, format = 'pdf',bbox_inches='tight')
@@ -1236,9 +1498,519 @@ def bimodal_fit(n, flux, bins, bin_center, bin_err, i, directory, save_tail, bin
 
 
 ##################################################################################################
+def save_figure(directory,target,save_tail,i,bin1,bin2):
+    
+    
+    if i == 0:
+        plt.title("Raw light curve, unbinned")
+        plt.savefig(directory+'/'+target+'_raw_flux_dist_gauss_unbinned'+save_tail, format = 'pdf', bbox_inches = 'tight')
+
+    if i == 1:
+        plt.title("Quaver regression, unbinned")
+        plt.savefig(directory+'/'+target+'_flux_dist_gauss_unbinned'+save_tail, format = 'pdf', bbox_inches = 'tight')
+
+    if i == 2:
+        plt.title("Quaver regression, "+bin1+" hr bins")
+        plt.savefig(directory+'/'+target+'_flux_dist_gauss_'+bin1+'hr'+save_tail, format = 'pdf', bbox_inches = 'tight')
+
+    if i == 3:
+        plt.title("Quaver regression, "+bin2+" hr bins")
+        plt.savefig(directory+'/'+target+'_flux_dist_gauss_'+bin2+'hr'+save_tail, format = 'pdf', bbox_inches = 'tight')
 
 
-def hist_and_fit(flux, i, subdir, target, sectbysect, group, bin1=0., bin2=0., visual = False):
+
+    if i == 4:
+        plt.title("Raw light curve, unbinned")
+        plt.savefig(directory+'/'+target+'_raw_subflux_dist_unbinned'+save_tail, format = 'pdf', bbox_inches = 'tight')
+
+    if i == 5:
+        plt.title("Quaver regression, unbinned")
+        plt.savefig(directory+'/'+target+'_subflux_dist_unbinned'+save_tail, format = 'pdf', bbox_inches = 'tight')
+
+    if i == 6:
+        plt.title("Quaver regression, "+bin1+" hr bins")
+        plt.savefig(directory+'/'+target+'_subflux_dist_'+bin1+'hr'+save_tail, format = 'pdf', bbox_inches = 'tight')
+
+    if i == 7:
+        plt.title("Quaver regression, "+bin2+" hr bins")
+        plt.savefig(directory+'/'+target+'_subflux_dist_'+bin2+'hr'+save_tail, format = 'pdf', bbox_inches = 'tight')
+        
+    return()
+
+def radii_range(timescale, error, z, δ = 1.0, Mbh = -1., u_mass = 'sol'):
+    
+    error = np.abs(error)
+    c = cst.c                     ## speed of light in m/s
+    G = cst.G                     ## Gravitational constant in m^3 kg^-1 s^-2
+    
+    print("Estimating emission region radius\nc=%.3e m/s; G=%.3e m^3/(kg s^2)\n"%(c,G))
+#     m_to_pc = 3.240779289e-14    ## meter to kpc conversion factor
+    Msol_to_kg = 1.98847e30       ## solar mass to kg conversion factor
+    day_to_sec = 86400
+#     print('\nEstimating emission region inner radius range')
+    print('Doppler factor: δ ~ %.2f'%δ)
+      
+    R_low = 1e-3*(timescale-error)*day_to_sec*c*δ #/(1.+z)   ## apparent R_min, in km, of object
+    R = 1e-3*timescale*day_to_sec*c*δ #/(1.+z)               ## apparent R, in km, of object
+    R_high = 1e-3*(timescale+error)*day_to_sec*c*δ #/(1.+z)  ## apparent R_max, in km, of object   
+    
+    if u_mass == 'sol':
+        print('M_BH ~ %.3e solar mass\n'%Mbh)
+        Mbh = Mbh*Msol_to_kg
+        
+    if Mbh > 0.:
+#         print('M_BH ~ %.3e kg\n'%Mbh)
+        Rsch = 2e-3*G*Mbh/c**2          ## Schwarzchild radius of object in km
+        
+        Rs_low = R_low/Rsch             ## apparent R_min, in Schwarzchild radii, of object
+        Rs = R/Rsch                     ## apparent R, in Schwarzchild radii, of object
+        Rs_high = R_high/Rsch           ## apparent R_max, in Schwarzchild radii, of object
+        
+        return(R_low,R,R_high,Rs_low,Rs,Rs_high)
+    else:
+        return(R_low,R,R_high)
+
+
+
+def simple_stats(flux, i, subdir, target, α, bins, sectbysect, group, bin1, bin2):
+    
+    nonzeroflux = np.nonzero(flux)[0]
+    flux = np.array(flux[nonzeroflux])
+   
+    flux_mean, flux_stdev = np.nanmean(flux), np.abs(np.nanstd(flux))
+    flux_min = np.nanmin(flux)
+    flux_max = np.nanmax(flux)
+
+    fivesig = 5.0*flux_stdev
+    flux = [x for x in flux if np.abs(flux_mean - x) <= fivesig]
+    
+    flux_mean, flux_stdev = np.nanmean(flux), np.sqrt(np.nanvar(flux, ddof = 1))
+    
+    n, bins = np.histogram(flux, bins=OptBins(flux), range=(flux_min,flux_max), density=False)
+      
+    bin_center = bins[:-1] + np.diff(bins) / 2
+    maxfreq = np.nanmax(n)
+
+    tick_labels = ticklabels(bin_center)
+
+    KS = KStest(flux_mean,flux_stdev,flux)
+
+#     fit_FWHM = 2.0*np.sqrt(2.0*np.log(2.0))*flux_stdev ## assuming gaussian distribution
+
+    plt.figure(figsize=(12,6), constrained_layout=True)
+    # plt.figure(figsize=(15,6))
+
+    ## Plot flux histogram as bar chart for special width and error bars    
+    plt.bar(bin_center, n, width = 0.85*(bin_center[1]-bin_center[0]), alpha=0.9,align='center',tick_label=tick_labels)
+
+    c_α = np.sqrt(-np.log(α/2.)/2.)
+    D_crit = c_α*np.sqrt(2./len(flux))
+    
+    ## Mark mean
+    plt.axvline(flux_mean,color= 'k',linestyle = 'dashed', label = 'Mean = %.3e\nσ = %.3e'%(flux_mean,flux_stdev))
+
+    ## Mark mean +/- stddev
+    if flux_mean+flux_stdev <= flux_max:
+        plt.axvline(flux_mean+flux_stdev,color= 'k',linestyle = 'dotted')
+        plt.annotate(text='', xy=(flux_mean,1.05*maxfreq), xytext=(flux_mean+flux_stdev,1.05*maxfreq), arrowprops=dict(arrowstyle='<->'))
+    else:
+        plt.axvline(flux_mean-flux_stdev,color= 'k',linestyle = 'dotted')
+        plt.annotate(text='', xy=(flux_mean,1.05*maxfreq), xytext=(flux_mean-flux_stdev,1.05*maxfreq), arrowprops=dict(arrowstyle='<->'))
+        
+    if i < 4 :
+        if flux_mean+flux_stdev <= flux_max:
+            plt.text(flux_mean+0.45*flux_stdev,1.07*maxfreq,'σ$_{F}$',fontsize='medium')
+        else:
+            plt.text(flux_mean-0.45*flux_stdev,1.07*maxfreq,'σ$_{F}$',fontsize='medium')
+
+        plt.suptitle('Flux distibution: '+target)
+        plt.xlabel('Flux bins')
+
+    elif i >= 4 :
+        if flux_mean+flux_stdev <= flux_max:
+            plt.text(flux_mean+0.45*flux_stdev,1.07*maxfreq,'σ$_{ΔF}$',fontsize='medium')
+        else:
+            plt.text(flux_mean-0.45*flux_stdev,1.07*maxfreq,'σ$_{ΔF}$',fontsize='medium')
+
+        plt.suptitle('Subsequent Flux distibution: '+target)
+        plt.xlabel('ΔF$_{ij}$')
+        
+    if flux_mean >= bins[-1:][0] or flux_mean <= bins[0]:
+        # Set a clean x-axis limit.
+        plt.xlim(xmin = bins[0], xmax = bins[-1:][0])
+    
+    plt.legend()
+
+    ###############################################################
+    ## Create or save to new flux distributions directory
+    try:
+        directory = os.path.join(subdir, 'flux_distributions')
+        os.mkdir(directory)
+
+        print("Directory '%s' created\n" %directory)    
+    except FileExistsError:
+        directory = subdir+'/flux_distributions'
+
+    if sectbysect == True:
+        save_tail = '_sectors'+group+'_simple.pdf'
+        try:
+            directory = os.path.join(subdir, 'flux_distributions/Sector_by_sector')
+            os.mkdir(directory)
+
+            print("Directory '%s' created\n" %directory)    
+        except FileExistsError:
+            directory = subdir+'/flux_distributions/Sector_by_sector'
+    else:
+        save_tail = '_simple.pdf'
+#         print(directory)
+    ###############################################################
+
+    ## Try to make sure all tick labels show and do not overlap        
+    if len(n) < 15:
+        plt.xticks(rotation=30)
+    else:
+        plt.xticks(rotation=90)
+
+    plt.grid(axis='y', alpha=0.75)
+    plt.ylabel('Normalized N')
+
+    # Set a clean upper y-axis limit.
+    plt.ylim(ymax = 1.15*maxfreq)
+
+    save_figure(directory,target,save_tail,i,bin1,bin2)
+
+    plt.close()
+    
+    return(flux_mean, flux_stdev, KS)
+
+def flat_gauss_fit(df, i, subdir, target, α, sectbysect, group, bin1, bin2):
+
+    ## Flatten light curve by removing longest linear trend
+    mean_flux = np.nanmean(df[1])
+    linear_fit = np.polyfit(df[0],df[1],1)
+    
+    flattened_reallc = np.subtract(df[1],linear_fit[0]*df[0])
+    new_mean = np.nanmean(flattened_reallc)
+    
+    ## Shift light curve back to original mean
+    flattened_reallc = flattened_reallc + (mean_flux-new_mean)
+    
+    nonzeroflux = np.nonzero(np.array(flattened_reallc))[0]
+    time = np.array(df[0][nonzeroflux])
+    real_flux = np.array(df[1][nonzeroflux])
+    flux = np.array(flattened_reallc[nonzeroflux])
+    
+    try:
+        flux_mean, flux_stdev = st.norm.fit(np.array(flux), method = "MM")
+        flux_min = np.nanmin(flux)
+        flux_max = np.nanmax(flux)
+
+        fivesig = 5.0*flux_stdev
+        flux = np.array([x for x in flux if np.abs(flux_mean - x) <= fivesig])
+
+        ## Reestimate statistical parameters without outliers
+        flux_mean, flux_stdev = st.norm.fit(flux, method = "MM")
+        
+        
+    except:
+        flux_mean, flux_stdev = np.nanmean(flux), np.sqrt(np.nanvar(flux))
+    
+    n_real, bins_real = np.histogram(real_flux, bins=OptBins(real_flux), range=(np.nanmin(real_flux),np.nanmax(real_flux)), density=False)
+    n, bins = np.histogram(flux, bins=OptBins(flux), range=(flux_min,flux_max), density=False)
+      
+    bin_center = bins[:-1] + np.diff(bins) / 2
+    maxfreq = np.nanmax(n)    
+
+    tick_labels = ticklabels(bin_center)
+    
+    init_params = (np.nanmax(n), flux_mean, flux_stdev)
+    try:
+        gauss_pars, _ = curve_fit(gaussian, xdata=bin_center, ydata=n, p0=init_params, sigma=bin_error(n, bins, flux), maxfev= 2000)#, absolute_sigma = True)
+
+        gauss_m = op.minimize(Min_PDF, [*gauss_pars], args=(np.array((n,bins),dtype='object'),gaussian),\
+                              method='Nelder-Mead', bounds = ((0,np.inf),(gauss_pars[1]-gauss_pars[2],gauss_pars[1]+gauss_pars[2]),(0.0, np.inf)), options={'ftol':1e-6,'disp':False})
+    except:
+        gauss_m = op.minimize(Min_PDF, [*init_params], args=(np.array((n,bins),dtype='object'),gaussian),\
+                                  method='Nelder-Mead', bounds = ((0,np.inf),(np.nanmin(bins),np.nanmax(bins)),(0.0, np.inf)), options={'ftol':1e-6,'disp':False})
+    
+    gauss_pars = gauss_m['x']
+        
+    fit_mean = gauss_pars[1]
+    fit_stdev = np.abs(gauss_pars[2])
+
+    KS = KStest(fit_mean,fit_stdev,flux)
+
+#     fit_FWHM = 2.0*np.sqrt(2.0*np.log(2.0))*fit_stdev ## assuming gaussian distribution
+
+    plt.figure(figsize=(12,6), constrained_layout=True)
+    # plt.figure(figsize=(15,6))
+
+    ## Plot flux histogram as bar chart for special width and error bars
+
+    fill_bins = np.hstack(np.array([[x,x] if (np.where(bins_real == x)[0] > 0) & (np.where(bins_real == x)[0] < len(bins_real)-1) else [x] for x in bins_real]))
+    fill_n = np.hstack(np.array([[x,x] for x in n_real]))
+    
+    plt.fill_between(fill_bins,0.,fill_n, alpha=0.75,label = r'$F_{observed}$',hatch = '/', zorder = 0)
+#     plt.bar(bin_center, n_real, width = 0.85*(bin_center[1]-bin_center[0]), alpha=0.75,\
+#             align='center',tick_label=tick_labels,label = r'$F_{observed}$',hatch = '/', zorder = 0)
+#     plt.fill_between(fill_bins,0.,fill_n, alpha=0.75,label = r'$F_{flattened}$',hatch = '/', zorder = 0)
+    plt.bar(bin_center, n, width = 0.85*(bin_center[1]-bin_center[0]), alpha=0.75,\
+            align='center',tick_label=tick_labels,label = r'$F_{flattened}$',hatch = 'o', zorder = 1)
+
+    ## Plot Gaussian fit over histogram
+    fit_flux = np.linspace(bins[0],bins[-1:],num=500)
+
+    gaussian_fit = gaussian(fit_flux, *gauss_pars)
+    fit_max = np.nanmax(gaussian_fit)
+
+    c_α = np.sqrt(-np.log(α/2.)/2.)
+    D_crit = c_α*np.sqrt(2./len(flux))
+    
+     ## Mark mean
+    plt.axvline(fit_mean,color= 'k',linestyle = 'dashed', label = 'Mean = %.3e\nσ = %.3e'%(fit_mean,fit_stdev))
+
+    ## Mark mean +/- stddev
+    if fit_mean+fit_stdev <= flux_max:
+        plt.axvline(fit_mean+fit_stdev,color= 'k',linestyle = 'dotted')
+        plt.annotate(text='', xy=(fit_mean,1.05*maxfreq), xytext=(fit_mean+fit_stdev,1.05*maxfreq), arrowprops=dict(arrowstyle='<->'))
+    else:
+        plt.axvline(fit_mean-fit_stdev,color= 'k',linestyle = 'dotted')
+        plt.annotate(text='', xy=(fit_mean,1.05*maxfreq), xytext=(fit_mean-fit_stdev,1.05*maxfreq), arrowprops=dict(arrowstyle='<->'))
+        
+    if i < 4 :
+        if fit_mean+fit_stdev <= flux_max:
+            plt.text(fit_mean+0.45*fit_stdev,1.07*maxfreq,'σ$_{F}$',fontsize='medium')
+        else:
+            plt.text(fit_mean-0.45*fit_stdev,1.07*maxfreq,'σ$_{F}$',fontsize='medium')
+
+        plt.suptitle('Flux distibution: '+target)
+        plt.xlabel('Flux bins')
+
+    elif i >= 4 :
+        if fit_mean+fit_stdev <= flux_max:
+            plt.text(fit_mean+0.45*fit_stdev,1.07*maxfreq,'σ$_{ΔF}$',fontsize='medium')
+        else:
+            plt.text(fit_mean-0.45*fit_stdev,1.07*maxfreq,'σ$_{ΔF}$',fontsize='medium')
+
+        plt.suptitle('Subsequent Flux distibution: '+target)
+        plt.xlabel('ΔF$_{ij}$')
+        
+    if fit_mean >= bins[-1:][0] or fit_mean <= bins[0]:
+        # Set a clean x-axis limit.
+        plt.xlim(xmin = bins[0], xmax = bins[-1:][0])
+        
+    if KS[0] <= D_crit:
+        plt.plot(fit_flux,gaussian_fit,color='g',label='gaussian fit\n'+r'$\frac{D}{D_{crit}}$: %.3e; p: %.3e'%(KS[0]/D_crit,KS[1]))
+    else:
+        plt.plot(fit_flux,gaussian_fit,color='r',label='gaussian fit\n'+r'$\frac{D}{D_{crit}}$: %.3e; p: %.3e'%(KS[0]/D_crit,KS[1]))
+    
+    plt.legend()
+
+    ###############################################################
+    ## Create or save to new flux distributions directory
+    try:
+        directory = os.path.join(subdir, 'flux_distributions')
+        os.mkdir(directory)
+
+        print("Directory '%s' created\n" %directory)    
+    except FileExistsError:
+        directory = subdir+'/flux_distributions'
+
+    if sectbysect == True:
+        save_tail = '_sectors'+group+'_interpolated.pdf'
+        try:
+            directory = os.path.join(subdir, 'flux_distributions/Sector_by_sector')
+            os.mkdir(directory)
+
+            print("Directory '%s' created\n" %directory)    
+        except FileExistsError:
+            directory = subdir+'/flux_distributions/Sector_by_sector'
+    else:
+        save_tail = '_flattened.pdf'
+#         print(directory)
+    ###############################################################
+
+    ## Try to make sure all tick labels show and do not overlap        
+    if len(n) < 15:
+        plt.xticks(rotation=30)
+    else:
+        plt.xticks(rotation=90)
+
+    plt.grid(axis='y', alpha=0.75)
+    plt.ylabel('N')
+
+    # Set a clean upper y-axis limit.
+    plt.ylim(ymax = 1.15*maxfreq if maxfreq > fit_max else 1.15*fit_max)
+
+    save_figure(directory,target,save_tail,i,bin1,bin2)
+
+    plt.close()
+    
+    fit_mean, fit_stdev, KS = simple_stats(np.array(real_flux), i, subdir, target, α, bins_real, sectbysect, group, bin1, bin2)
+    
+    return(flux_mean, fit_stdev, KS)
+
+
+def interp_gauss_fit(uninterp_df, df, i, subdir, target, α, sectbysect, group, bin1, bin2):
+
+    
+    nonzeroflux = np.nonzero(np.array(df[1]))[0]
+    time = np.array(df[0][nonzeroflux])
+    flux = np.array(df[1][nonzeroflux])
+    err = np.array(df[2][nonzeroflux])
+    
+    lc = np.column_stack((time,flux,err))
+    
+    try:
+        flux_mean, flux_stdev = st.norm.fit(np.array(flux), method = "MM")
+        flux_min = np.nanmin(flux)
+        flux_max = np.nanmax(flux)
+
+        fivesig = 5.0*flux_stdev
+        flux = np.array([x for x in flux if np.abs(flux_mean - x) <= fivesig])
+
+        ## Reestimate statistical parameters without outliers
+        flux_mean, flux_stdev = st.norm.fit(flux, method = "MM")
+        
+        
+    except:
+        flux_mean, flux_stdev = np.nanmean(flux), np.sqrt(np.nanvar(flux))
+    
+    n, bins = np.histogram(flux, bins=OptBins(flux), range=(flux_min,flux_max), density=False)
+      
+    bin_center = bins[:-1] + np.diff(bins) / 2
+    maxfreq = np.nanmax(n)    
+
+    tick_labels = ticklabels(bin_center)
+    
+    init_params = (np.nanmax(n), flux_mean, flux_stdev)
+    try:
+        gauss_pars, _ = curve_fit(gaussian, xdata=bin_center, ydata=n, p0=init_params, sigma=bin_error(n, bins, flux), maxfev= 2000)#, absolute_sigma = True)
+
+        gauss_m = op.minimize(Min_PDF, [*gauss_pars], args=(np.array((n,bins),dtype='object'),gaussian),\
+                              method='Nelder-Mead', bounds = ((0,np.inf),(gauss_pars[1]-gauss_pars[2],gauss_pars[1]+gauss_pars[2]),(0.0, np.inf)), options={'ftol':1e-6,'disp':False})
+    except:
+        gauss_m = op.minimize(Min_PDF, [*init_params], args=(np.array((n,bins),dtype='object'),gaussian),\
+                                  method='Nelder-Mead', bounds = ((0,np.inf),(np.nanmin(bins),np.nanmax(bins)),(0.0, np.inf)), options={'ftol':1e-6,'disp':False})
+    
+    gauss_pars = gauss_m['x']
+        
+    fit_mean = gauss_pars[1]
+    fit_stdev = np.abs(gauss_pars[2])
+
+    KS = KStest(fit_mean,fit_stdev,flux)
+
+#     fit_FWHM = 2.0*np.sqrt(2.0*np.log(2.0))*fit_stdev ## assuming gaussian distribution
+
+    plt.figure(figsize=(12,6), constrained_layout=True)
+    # plt.figure(figsize=(15,6))
+
+    ## Plot flux histogram as bar chart for special width and error bars
+    real_flux = np.array([f for t,f,e in lc if e!=0])
+    false_flux = np.array([f for t,f,e in lc if e==0])
+    
+    n_real, bins_real = np.histogram(real_flux, bins=OptBins(flux), range=(flux_min,flux_max), density=False)
+    n_false, bins_false = np.histogram(false_flux, bins=OptBins(flux), range=(flux_min,flux_max), density=False)
+    
+    plt.bar(bin_center, n_real, width = 0.85*(bin_center[1]-bin_center[0]), alpha=0.8,\
+            align='center',tick_label=tick_labels,label = r'$F_{observed}$')
+    plt.bar(bin_center, n_false, bottom = n_real, width = 0.85*(bin_center[1]-bin_center[0]), alpha=0.9,\
+            align='center',tick_label=tick_labels,label = r'$F_{interpolated}$')
+
+    ## Plot Gaussian fit over histogram
+    fit_flux = np.linspace(bins[0],bins[-1:],num=500)
+
+    gaussian_fit = gaussian(fit_flux, *gauss_pars)
+    fit_max = np.nanmax(gaussian_fit)
+
+    c_α = np.sqrt(-np.log(α/2.)/2.)
+    D_crit = c_α*np.sqrt(2./len(flux))
+    
+     ## Mark mean
+    plt.axvline(fit_mean,color= 'k',linestyle = 'dashed', label = 'Mean = %.3e\nσ = %.3e'%(fit_mean,fit_stdev))
+
+    ## Mark mean +/- stddev
+    if fit_mean+fit_stdev <= flux_max:
+        plt.axvline(fit_mean+fit_stdev,color= 'k',linestyle = 'dotted')
+        plt.annotate(text='', xy=(fit_mean,1.05*maxfreq), xytext=(fit_mean+fit_stdev,1.05*maxfreq), arrowprops=dict(arrowstyle='<->'))
+    else:
+        plt.axvline(fit_mean-fit_stdev,color= 'k',linestyle = 'dotted')
+        plt.annotate(text='', xy=(fit_mean,1.05*maxfreq), xytext=(fit_mean-fit_stdev,1.05*maxfreq), arrowprops=dict(arrowstyle='<->'))
+        
+    if i < 4 :
+        if fit_mean+fit_stdev <= flux_max:
+            plt.text(fit_mean+0.45*fit_stdev,1.07*maxfreq,'σ$_{F}$',fontsize='medium')
+        else:
+            plt.text(fit_mean-0.45*fit_stdev,1.07*maxfreq,'σ$_{F}$',fontsize='medium')
+
+        plt.suptitle('Flux distibution: '+target)
+        plt.xlabel('Flux bins')
+
+    elif i >= 4 :
+        if fit_mean+fit_stdev <= flux_max:
+            plt.text(fit_mean+0.45*fit_stdev,1.07*maxfreq,'σ$_{ΔF}$',fontsize='medium')
+        else:
+            plt.text(fit_mean-0.45*fit_stdev,1.07*maxfreq,'σ$_{ΔF}$',fontsize='medium')
+
+        plt.suptitle('Subsequent Flux distibution: '+target)
+        plt.xlabel('ΔF$_{ij}$')
+        
+    if fit_mean >= bins[-1:][0] or fit_mean <= bins[0]:
+        # Set a clean x-axis limit.
+        plt.xlim(xmin = bins[0], xmax = bins[-1:][0])
+        
+    if KS[0] <= D_crit:
+        plt.plot(fit_flux,gaussian_fit,color='g',label='gaussian fit\n'+r'$\frac{D}{D_{crit}}$: %.3e; p: %.3e'%(KS[0]/D_crit,KS[1]))
+    else:
+        plt.plot(fit_flux,gaussian_fit,color='r',label='gaussian fit\n'+r'$\frac{D}{D_{crit}}$: %.3e; p: %.3e'%(KS[0]/D_crit,KS[1]))
+        fit_mean, fit_stdev, KS = flat_gauss_fit(uninterp_df, i, subdir, target, α, sectbysect, group, bin1, bin2)
+
+    plt.legend()
+
+    ###############################################################
+    ## Create or save to new flux distributions directory
+    try:
+        directory = os.path.join(subdir, 'flux_distributions')
+        os.mkdir(directory)
+
+        print("Directory '%s' created\n" %directory)    
+    except FileExistsError:
+        directory = subdir+'/flux_distributions'
+
+    if sectbysect == True:
+        save_tail = '_sectors'+group+'_interpolated.pdf'
+        try:
+            directory = os.path.join(subdir, 'flux_distributions/Sector_by_sector')
+            os.mkdir(directory)
+
+            print("Directory '%s' created\n" %directory)    
+        except FileExistsError:
+            directory = subdir+'/flux_distributions/Sector_by_sector'
+    else:
+        save_tail = '_interpolated.pdf'
+#         print(directory)
+    ###############################################################
+
+    ## Try to make sure all tick labels show and do not overlap        
+    if len(n) < 15:
+        plt.xticks(rotation=30)
+    else:
+        plt.xticks(rotation=90)
+
+    plt.grid(axis='y', alpha=0.75)
+    plt.ylabel('N')
+
+    # Set a clean upper y-axis limit.
+    plt.ylim(ymax = 1.15*maxfreq if maxfreq > fit_max else 1.15*fit_max)
+
+    save_figure(directory,target,save_tail,i,bin1,bin2)
+
+    plt.close()
+    
+    return(flux_mean, fit_stdev, KS)
+
+def hist_and_fit(uninterp_df, df, i, subdir, target, sectbysect, group='',\
+                 bin1=0., bin2=0., α = 0.05,  visual = False):
     '''
     Algorithm to fit distribution to gaussian, bimodal gaussian, and lognormal curves
     
@@ -1251,60 +2023,49 @@ def hist_and_fit(flux, i, subdir, target, sectbysect, group, bin1=0., bin2=0., v
         group (string)               - current sectors under analysis if sectbysect is True 
         bin1 (string)                - string which specified how many hours for one binning scheme
         bin2 (string)                - string which specified how many hours for one binning scheme)
+        α (float)                    - value between 0 and 1 to set significance of KS test
         visual (boolean)             - should figures be shown
+        
+    outputs:
+        fit_stdev (float)
+        flux_mean (float)
+        flux_min (float)
+        flux_max (float)
+        bin_center (array)
     '''
 
-    if 0 < i < 4:
-        nonzeroflux = np.nonzero(np.array(flux))[0]
+    if 0 <= i < 4:
+        nonzeroflux = np.nonzero(np.array(uninterp_df[1]))[0]
         flux = np.array(uninterp_df[1][nonzeroflux])
+    else:
+        flux = np.array(uninterp_df[1])
 
     ## Estimate initial statistical parameters then remove outliers beyond 5-sigma
     try:
         flux_mean, flux_stdev = st.norm.fit(np.array(flux), method = "MM")
-#         flux_mean = np.mean(flux)
-#         flux_stdev = np.std(flux)
-        flux_min = np.min(flux)
-        flux_max = np.max(flux)
-
         fivesig = 5.0*flux_stdev
         flux = [x for x in flux if np.abs(flux_mean - x) <= fivesig]
 
         ## Reestimate statistical parameters without outliers
         flux_mean, flux_stdev = st.norm.fit(np.array(flux), method = "MM")
-        flux_min = np.min(flux)
-        flux_max = np.max(flux)
+        
         
     except:
-#         print(flux)
-        ## Estimate statistical parameters without outliers
-        flux_mean, flux_stdev = st.norm.fit(np.array(flux), method = "MM")
-        flux_min = np.min(flux)
-        flux_max = np.max(flux)
-        
+        flux_mean, flux_stdev = np.nanmean(flux), np.sqrt(np.nanvar(flux))
     
+    flux_min = np.nanmin(flux)
+    flux_max = np.nanmax(flux)
+        
     ###############################################################
     
     ## Make histograms of data with and without normalization
-    n, bins = np.histogram(flux, bins=OptBins(flux), range=(flux_min,flux_max), density=True)
-    m, bims = np.histogram(flux, bins=OptBins(flux), range=(flux_min,flux_max), density=False)
-
-    
-    bin_err = np.divide(bin_error(m, bims, flux),np.sum(m))
-#     bin_err = bin_error(m, bims, flux)
-#     bin_rms = RMS(m, bims, flux)
+    n, bins = np.histogram(flux, bins=OptBins(flux), range=(flux_min,flux_max), density=False)
+    bin_err = bin_error(n, bins, flux)
       
     bin_center = bins[:-1] + np.diff(bins) / 2
-    maxfreq = n.max()
+    maxfreq = np.nanmax(n)
     
-
-    if len(str(int(bin_center[0] +0.5))) <= 2:
-        tick_labels = [str(np.round(x,decimals=2)) for x in bin_center]
-        
-    elif len(str(int(bin_center[0] + 0.5))) == 3 :
-        tick_labels = [str(np.round(x,decimals=1)) for x in bin_center]
-        
-    else:
-        tick_labels = [str(int(x + 0.5)) for x in bin_center]
+    tick_labels = ticklabels(bin_center)
         
     ###############################################################
     
@@ -1313,87 +2074,46 @@ def hist_and_fit(flux, i, subdir, target, sectbysect, group, bin1=0., bin2=0., v
     while gauss_fit_good == False:
         
         ## Obtain statistical parameters for assumed Gaussian fit
-        init_params = (n.max(), flux_mean, flux_stdev)
+        init_params = (np.nanmax(n), flux_mean, flux_stdev)
         try:
             gauss_pars, _ = curve_fit(gaussian, xdata=bin_center, ydata=n, p0=init_params, sigma=bin_err, maxfev= 1000)#, absolute_sigma = True)
         
-            gauss_m = op.minimize(Min_PDF, [*gauss_pars], args=(np.array((n,bins),dtype='object'),gaussian), method='Nelder-Mead', bounds = ((0,np.inf),(np.min(bins),np.max(bins)),(0.0, np.inf)), options={'ftol':1e-6,'disp':False})
+            gauss_m = op.minimize(Min_PDF, [*gauss_pars], args=(np.array((n,bins),dtype='object'),gaussian),\
+                                  method='Nelder-Mead', bounds = ((0,np.inf),(gauss_pars[1]-gauss_pars[2],gauss_pars[1]+gauss_pars[2]),(0.0, np.inf)), options={'ftol':1e-6,'disp':False})
         except:
-            gauss_m = op.minimize(Min_PDF, [*init_params], args=(np.array((n,bins),dtype='object'),gaussian), method='Nelder-Mead', bounds = ((0,np.inf),(np.min(bins),np.max(bins)),(0.0, np.inf)), options={'ftol':1e-6,'disp':False})
+            gauss_m = op.minimize(Min_PDF, [*init_params], args=(np.array((n,bins),dtype='object'),gaussian),\
+                                  method='Nelder-Mead', bounds = ((0,np.inf),(np.nanmin(bins),np.nanmax(bins)),(0.0, np.inf)), options={'ftol':1e-6,'disp':False})
             
         gauss_pars = gauss_m['x']
         
         fit_mean = gauss_pars[1]
         fit_stdev = np.abs(gauss_pars[2])
         
-        KS_K = []
-        KS_p = []
+        fit_mean_gauss = gauss_pars[1]
+        fit_stdev_gauss = np.abs(gauss_pars[2])
         
-        for i in range(0,2000):
-            rnd_dist = np.random.normal(loc = fit_mean, scale = fit_stdev, size = len(flux))
-            KS = st.ks_2samp(flux, rnd_dist)
-            KS_K.append(KS[0])
-            KS_p.append(KS[1])
-            
-        KS = [np.nanmean(KS_K),np.nanmean(KS_p)]    
-                
-        fit_FWHM = 2.0*np.sqrt(2.0*np.log(2.0))*fit_stdev ## assuming gaussian distribution
+        KS = KStest(fit_mean,fit_stdev,flux)
+                 
+#         fit_FWHM = 2.0*np.sqrt(2.0*np.log(2.0))*fit_stdev ## assuming gaussian distribution
 
         plt.figure(figsize=(12,6), constrained_layout=True)
         # plt.figure(figsize=(15,6))
 
         ## Plot flux histogram as bar chart for special width and error bars
-        plt.bar(bin_center, n, width = 0.85*(bin_center[1]-bin_center[0]), alpha=0.9, align='center',tick_label=tick_labels) #yerr=bin_err,
+        plt.bar(bin_center, n, width = 0.85*(bin_center[1]-bin_center[0]), alpha=0.9, align='center',tick_label=tick_labels)
 
 
         ## Plot Gaussian fit over histogram
         fit_flux = np.linspace(bins[0],bins[-1:],num=500)
         
         gaussian_fit = gaussian(fit_flux, *gauss_pars)
-        fit_max = np.max(gaussian_fit)
-        if KS[1] >= 0.05:
-            plt.plot(fit_flux,gaussian_fit,color='g',label='Gaussian fit\nKS: %.3e; p: %.3e'%(KS[0],KS[1]))
-        else:
-            plt.plot(fit_flux,gaussian_fit,color='r',label='Gaussian fit\nKS: %.3e; p: %.3e'%(KS[0],KS[1]))
+        fit_max = np.nanmax(gaussian_fit)
         
+        c_α = np.sqrt(-0.5*np.log(α/2.))
+        D_crit = c_α*np.sqrt(2./len(flux))
         
-        ## Mark mean
         plt.axvline(fit_mean,color= 'k',linestyle = 'dashed', label = 'Mean = %.3e\nσ = %.3e'%(fit_mean,fit_stdev))
-
-        ## Mark mean +/- stddev
-        if fit_mean+fit_stdev <= flux_max:
-            plt.axvline(fit_mean+fit_stdev,color= 'k',linestyle = 'dotted')
-            plt.annotate(text='', xy=(fit_mean,1.05*maxfreq), xytext=(fit_mean+fit_stdev,1.05*maxfreq), arrowprops=dict(arrowstyle='<->'))
-        else:
-            plt.axvline(fit_mean-fit_stdev,color= 'k',linestyle = 'dotted')
-            plt.annotate(text='', xy=(fit_mean,1.05*maxfreq), xytext=(fit_mean-fit_stdev,1.05*maxfreq), arrowprops=dict(arrowstyle='<->'))
-
-        plt.legend()
-
-        ###############################################################
-        ## Create or save to new flux distributions directory
-        try:
-            directory = os.path.join(subdir, 'flux_distributions')
-            os.mkdir(directory)
-
-            print("Directory '%s' created\n" %directory)    
-        except FileExistsError:
-            directory = subdir+'/flux_distributions'
-            
-        if sectbysect == True:
-            save_tail = '_sectors'+group+'.pdf'
-            try:
-                directory = os.path.join(subdir, 'flux_distributions/Sector_by_sector/')
-                os.mkdir(directory)
-
-                print("Directory '%s' created\n" %directory)    
-            except FileExistsError:
-                directory = subdir+'/flux_distributions/Sector_by_sector/'
-        else:
-            save_tail = '.pdf'
-
-        ###############################################################
-
+        
         if i < 4 :
             if fit_mean+fit_stdev <= flux_max:
                 plt.text(fit_mean+0.45*fit_stdev,1.07*maxfreq,'σ$_{F}$',fontsize='medium')
@@ -1412,6 +2132,59 @@ def hist_and_fit(flux, i, subdir, target, sectbysect, group, bin1=0., bin2=0., v
             plt.suptitle('Subsequent Flux distibution: '+target)
             plt.xlabel('ΔF$_{ij}$')
 
+        ## Mark mean +/- stddev
+        if fit_mean+fit_stdev <= flux_max:
+            plt.axvline(fit_mean+fit_stdev,color= 'k',linestyle = 'dotted')
+            plt.annotate(text='', xy=(fit_mean,1.05*maxfreq), xytext=(fit_mean+fit_stdev,1.05*maxfreq), arrowprops=dict(arrowstyle='<->'))
+        else:
+            plt.axvline(fit_mean-fit_stdev,color= 'k',linestyle = 'dotted')
+            plt.annotate(text='', xy=(fit_mean,1.05*maxfreq), xytext=(fit_mean-fit_stdev,1.05*maxfreq), arrowprops=dict(arrowstyle='<->'))
+        
+        if fit_mean >= bins[-1:][0] or fit_mean <= bins[0]:
+            # Set a clean x-axis limit.
+            plt.xlim(xmin = bins[0], xmax = bins[-1:][0])
+
+            
+        if KS[0] <= D_crit:
+            plt.plot(fit_flux,gaussian_fit,color='g',label='gaussian fit\n'+r'$\frac{D}{D_{crit}}$: %.3e; p: %.3e'%(KS[0]/D_crit,KS[1]))
+            
+        else:
+            plt.plot(fit_flux,gaussian_fit,color='r',label='gaussian fit\n'+r'$\frac{D}{D_{crit}}$: %.3e; p: %.3e'%(KS[0]/D_crit,KS[1]))
+            
+            within_bounds = (np.nanmean(flux) - np.sqrt(np.nanvar(flux))) <= flux_mean <= (np.nanmean(flux) - np.sqrt(np.nanvar(flux)))
+            if 1 <= i <= 3 and within_bounds == True:
+                flux_mean, fit_stdev, KS = interp_gauss_fit(uninterp_df, df, i, subdir, target, α, sectbysect, group, bin1=bin1, bin2=bin2)
+            else:
+                fit_mean_gauss, fit_stdev_gauss, KS = simple_stats(np.array(uninterp_df[1]), i, subdir, target, α, bins, sectbysect, group, bin1, bin2)
+            
+            
+        plt.legend()
+
+        ###############################################################
+        ## Create or save to new flux distributions directory
+        try:
+            directory = os.path.join(subdir, 'flux_distributions')
+            os.mkdir(directory)
+
+            print("Directory '%s' created\n" %directory)    
+        except FileExistsError:
+            directory = subdir+'/flux_distributions'
+
+        if sectbysect == True:
+            save_tail = '_sectors'+group+'.pdf'
+            try:
+                directory = os.path.join(subdir, 'flux_distributions/Sector_by_sector')
+                os.mkdir(directory)
+
+                print("Directory '%s' created\n" %directory)    
+            except FileExistsError:
+                directory = subdir+'/flux_distributions/Sector_by_sector'
+        else:
+            save_tail = '.pdf'
+    #         print(directory)
+        ###############################################################
+
+
         ## Try to make sure all tick labels show and do not overlap        
         if len(n) < 15:
             plt.xticks(rotation=30)
@@ -1421,58 +2194,21 @@ def hist_and_fit(flux, i, subdir, target, sectbysect, group, bin1=0., bin2=0., v
         plt.grid(axis='y', alpha=0.75)
         plt.ylabel('Normalized N')
 
-        if fit_mean >= bins[-1:][0] or fit_mean <= bins[0]:
-            # Set a clean x-axis limit.
-            plt.xlim(xmin = bins[0], xmax = bins[-1:][0])
-        
         # Set a clean upper y-axis limit.
         plt.ylim(ymax = 1.15*maxfreq if maxfreq > fit_max else 1.15*fit_max)
 
         # Set a clean 5-sigma x-axis limit.
     #     fivesig = 5.0*fit_stdev
-    #     plt.xlim(xmin = (fit_mean - 1.1*fivesig) if np.abs(fit_mean - np.min(bin_center)) > fivesig else (np.min(bin_center) - 0.1*np.abs(np.min(bin_center))),\
-    #         xmax = (fit_mean + 1.1*fivesig) if np.abs(np.max(bin_center) - fit_mean) > fivesig else (np.max(bin_center) + 0.1*np.abs(np.max(bin_center))) )
+    #     plt.xlim(xmin = (fit_mean - 1.1*fivesig) if np.abs(fit_mean - np.nanmin(bin_center)) > fivesig else (np.nanmin(bin_center) - 0.1*np.abs(np.nanmin(bin_center))),\
+    #         xmax = (fit_mean + 1.1*fivesig) if np.abs(np.nanmax(bin_center) - fit_mean) > fivesig else (np.nanmax(bin_center) + 0.1*np.abs(np.nanmax(bin_center))) )
 
 
-        if i == 0:
-            plt.title("Raw light curve, unbinned")
-            plt.savefig(directory+'/'+target+'_raw_flux_dist_gauss_unbinned'+save_tail, format = 'pdf')
-
-        if i == 1:
-            plt.title("Quaver regression, unbinned")
-            plt.savefig(directory+'/'+target+'_flux_dist_gauss_unbinned'+save_tail, format = 'pdf')
-
-        if i == 2:
-            plt.title("Quaver regression, "+bin1+" hr bins")
-            plt.savefig(directory+'/'+target+'_flux_dist_gauss_'+bin1+'hr'+save_tail, format = 'pdf')
-
-        if i == 3:
-            plt.title("Quaver regression, "+bin2+" hr bins")
-            plt.savefig(directory+'/'+target+'_flux_dist_gauss_'+bin2+'hr'+save_tail, format = 'pdf')
-
-
-
-        if i == 4:
-            plt.title("Raw light curve, unbinned")
-            plt.savefig(directory+'/'+target+'_raw_subflux_dist_unbinned'+save_tail, format = 'pdf')
-
-        if i == 5:
-            plt.title("Quaver regression, unbinned")
-            plt.savefig(directory+'/'+target+'_subflux_dist_unbinned'+save_tail, format = 'pdf')
-
-        if i == 6:
-            plt.title("Quaver regression, "+bin1+" hr bins")
-            plt.savefig(directory+'/'+target+'_subflux_dist_'+bin1+'hr'+save_tail, format = 'pdf')
-
-        if i == 7:
-            plt.title("Quaver regression, "+bin2+" hr bins")
-            plt.savefig(directory+'/'+target+'_subflux_dist_'+bin2+'hr'+save_tail, format = 'pdf')
-
-
-#         visual = True
+        save_figure(directory,target,save_tail,i,bin1,bin2)
+        
+    #         visual = True
         if visual == True:
             plt.show()
-        
+
             fit_check = input("Is gaussian fit satisfactory? [y/n] ")
 
             if fit_check == "y" or fit_check == "Y" or fit_check == "yes" or fit_check == "YES":
@@ -1481,53 +2217,54 @@ def hist_and_fit(flux, i, subdir, target, sectbysect, group, bin1=0., bin2=0., v
                 continue
         else:
             gauss_fit_good = True
-        
+
         plt.close()
 
     if i > 1 and i < 4 :
         lognorm_fit_good = False
         while lognorm_fit_good == False:
-            
-            
+
             lognormal_fit(n, flux, bins, bin_center, bin_err, i, directory, save_tail, bin1, bin2, visual = False)
-            
+
             if visual == True:
-            
+
                 fit_check = input("Is lognormal fit satisfactory? [y/n] ")
-            
+
                 if fit_check == "y" or fit_check == "Y" or fit_check == "yes" or fit_check == "YES":
                     lognorm_fit_good = True
                 else: 
                     continue
                 plt.close()
-                
-        
+
+
             else:
                 lognorm_fit_good = True
                 plt.close()
-        
-        
+
+
         bimodal_fit_good = False
         while bimodal_fit_good == False:
-            
+
             bimodal_fit(n, flux, bins, bin_center, bin_err, i, directory, save_tail, bin1, bin2, visual = False)
-            
+
             if visual == True:
                 fit_check = input("Is bimodal fit satisfactory? [y/n] ")
-            
+
                 if fit_check == "y" or fit_check == "Y" or fit_check == "yes" or fit_check == "YES":
                     bimodal_fit_good = True
                 else: 
                     continue
                 plt.close()
-                
+
             else:
                 bimodal_fit_good = True
                 plt.close()
-                
-            
 
-    return(fit_stdev, flux_mean, flux_min, flux_max, bin_center)
+    if 1 <= i <= 3:
+        return(fit_mean_gauss, fit_stdev_gauss, flux_mean, fit_stdev, flux_min, flux_max, bin_center)
+    else:
+        return(fit_mean_gauss, fit_stdev_gauss, flux_min, flux_max, bin_center)
+        
 
 
 
@@ -1558,7 +2295,7 @@ adj = True
 # pcm == 3: full hybrid method
 
 cycle = '1'
-pcm = 3
+pcm = 2
 
 if pcm == 1: 
     file_tail = '_cycle'+cycle+'_PCA_lc.dat'
@@ -1590,9 +2327,9 @@ for subdir, dirs, files in os.walk(rootdir):
      
     ## Get target name from subdirectory name
     target = os.path.basename(subdir)
-    if "PKS" in target or "PMNJ" in target or "3C" in target or "4C" in target or "NVSS" in target\
+    if "1ES" in target or "PKS" in target or "PMNJ" in target or "3C" in target or "4C" in target or "NVSS" in target\
         or "1RXS" in target or "2MAS" in target or "WISE" in target or "NGC" in target:
-        files = glob.glob(subdir+'/**/**.dat')
+        files = np.concatenate([glob.glob(subdir+'/**.dat'),glob.glob(subdir+'/**/**.dat')],axis = 0) #glob.glob(subdir+'/**/**.dat') #
 
     ## Initialize arrays for plotting
         for file in files:
@@ -1611,7 +2348,18 @@ for subdir, dirs, files in os.walk(rootdir):
                 print("Target: %s"%target)
 
                 print("\nWorking in directory: %s\n"%subdir)
-
+                
+                temp = pd.read_excel('/users/rdingler/AGNstudy/sample_data.xlsx')
+                z = float(temp.loc[np.where(temp['Target'] == target)[0][0],'redshift'])
+                print("Recorded redshift: z = %.3f"%z)
+                activity = str(temp.loc[np.where(temp['Target'] == target)[0][0],'Type'])
+                print("Activity type: %s"%activity)
+                doppler = float(temp.loc[np.where(temp['Target'] == target)[0][0],'Doppler'])
+                if doppler == 0.:
+                    doppler = 11.
+                    print("No recorded doppler factor: δ = 11.")
+                else:
+                    print("Recorded doppler factor: δ = %.3f"%doppler)
 
 
                 group = ''
@@ -1660,9 +2408,34 @@ for subdir, dirs, files in os.walk(rootdir):
 
     ###############################################################################################             
     ## Find shortest timescales of exponential rise and decay
-                print("\nFinding shortest time scales of variablity. This may take a while for light light curves.")        
-                tau_dec_min, delt_dec_min, tau_inc_min, delt_inc_min = shortest_timescale(rootdir,target,uninterp_df,sectbysect,sectors=group)
-
+                print("\nFinding shortest time scales of variablity. This may take a while for long light curves.")        
+                tau_dec_min, delt_dec_min, err_tau_dec, timescale_dec_min,\
+                    tau_inc_min, delt_inc_min, err_tau_inc, timescale_inc_min = shortest_timescale(rootdir,target,uninterp_df,z,sectbysect,sectors=group)
+                
+#                 tau_dec_min, delt_dec_min, err_tau_dec, timescale_dec_min,\
+#                         tau_inc_min, delt_inc_min, err_tau_inc, timescale_inc_min = shortest_timescale(rootdir,target,uninterp_df,z,sectbysect,sectors=group)
+                    #######################################################################################
+                
+                if timescale_dec_min < timescale_inc_min:
+                    timescale = tau_dec_min ## Shortest timescale of variability in seconds
+                    scale_error = err_tau_dec
+                else:
+                    timescale = tau_inc_min ## Shortest timescale of variability in seconds
+                    scale_error = err_tau_inc
+                
+#                 T_int = 5e10
+#                 if activity == "BLL":
+#                     T_var = 10**np.log10(T_int * 6.25**3)
+#                     doppler = (1.+z)*np.cbrt(T_var/T_int)
+#                 elif activity == "FSRQ":
+#                     T_var = 10**np.log10(T_int * 14.61**3)
+#                     doppler = (1.+z)*np.cbrt(T_var/T_int)
+#                 else:
+#                     doppler = 10.0
+                
+                R_low, R_appox, R_high, Rs_low, Rs_appox, Rs_high\
+                                        = radii_range(timescale, scale_error, z, δ = doppler, Mbh = 1e8, u_mass = 'sol') ## calculate range of BH radii assumin Mbh = 10^8 solar mass doppler =10
+#             #     R9_low, R9, R9_high, Rs9_low, Rs9, Rs9_high  = radii_range(timescale, error, z, δ = 10.0, Mbh = 1e9, u_mass = 'sol')
 
     ############################################################################################### 
     ## Find (Smith 2018) statistics and check flux-change distribution, 
@@ -1674,13 +2447,17 @@ for subdir, dirs, files in os.walk(rootdir):
                 print("\nFitting histograms of flux data")
                 for i in range(0,4):
                     if i == 0 and raw == True:
-                        lc_raw_stdev, flux_raw_mean, flux_raw_min , flux_raw_max, flux_raw_bins= hist_and_fit(raw_df[1],i,subdir,target,sectbysect,group)
+                        flux_raw_mean, flux_raw_stdev, flux_raw_min , flux_raw_max,\
+                        flux_raw_bins = hist_and_fit(raw_df,df,i,subdir,target,sectbysect,group)
                     if i == 1:
-                        lc_reg_stdev, flux_reg_mean, flux_reg_min , flux_reg_max, flux_reg_bins = hist_and_fit(uninterp_df[1],i,subdir,target,sectbysect,group)
+                        lc_reg_mean, lc_reg_stdev, flux_reg_mean, flux_reg_stdev, flux_reg_min , flux_reg_max,\
+                        flux_reg_bins = hist_and_fit(uninterp_df,df,i,subdir,target,sectbysect,group)
                     if i == 2:
-                        lc_bin1_stdev, flux_bin1_mean, flux_bin1_min , flux_bin1_max, flux_bin1_bins = hist_and_fit(binnedflux_bin1[1],i,subdir,target,sectbysect,group,bin1=bin1,bin2=bin2)
+                        lc_bin1_mean, lc_bin1_stdev, flux_bin1_mean, flux_bin1_stdev, flux_bin1_min , flux_bin1_max,\
+                        flux_bin1_bins = hist_and_fit(binnedflux_bin1,df,i,subdir,target,sectbysect,group,bin1=bin1,bin2=bin2)
                     if i == 3:
-                        lc_bin2_stdev, flux_bin2_mean, flux_bin2_min , flux_bin2_max, flux_bin2_bins = hist_and_fit(binnedflux_bin2[1],i,subdir,target,sectbysect,group,bin1=bin1,bin2=bin2)
+                        lc_bin2_mean, lc_bin2_stdev, flux_bin2_mean, flux_bin2_stdev, flux_bin2_min , flux_bin2_max,\
+                        flux_bin2_bins = hist_and_fit(binnedflux_bin2,df,i,subdir,target,sectbysect,group,bin1=bin1,bin2=bin2)
 
     #######################################################################################                    
     ## Find F-parameters
@@ -1696,12 +2473,14 @@ for subdir, dirs, files in os.walk(rootdir):
 
                 print("\nCalculating excess variance within %s hr and %s hr bins"%(bin1,bin2))
                 Xvar_bin1, Fvar_bin1, XvarErr_bin1, FvarErr_bin1 = excess_variance(binnedflux_bin1[0],binnedflux_bin1[1],binnedflux_bin1[2],\
-                                                                                stdev = binnedflux_bin1[3], len_lc = binnedflux_bin1[4], MSE = binnedflux_bin1[5] , total = False)
+                                                                                flux_mean = flux_bin1_mean, stdev = binnedflux_bin1[3],\
+                                                                                   len_lc = binnedflux_bin1[4], MSE = binnedflux_bin1[5] , total = False)
 
                 Xvar_bin1_mean = np.nanmean(Xvar_bin1)
                 Fvar_bin1_mean = np.nanmean(Fvar_bin1)
 
-                plot_excess_variance(subdir, df, binnedflux_bin1, Xvar_bin1, XvarErr_bin1, Xvar_bin1_mean, Fvar_bin1, FvarErr_bin1, Fvar_bin1_mean, bin1, sectbysect, group)
+                plot_excess_variance(subdir, uninterp_df, binnedflux_bin1, Xvar_bin1, XvarErr_bin1, Xvar_bin1_mean,\
+                                     Fvar_bin1, FvarErr_bin1, Fvar_bin1_mean, bin1, sectbysect, group)
 
 
 
@@ -1710,60 +2489,77 @@ for subdir, dirs, files in os.walk(rootdir):
 
 
                 Xvar_bin2, Fvar_bin2, XvarErr_bin2, FvarErr_bin2 = excess_variance(binnedflux_bin2[0],binnedflux_bin2[1],binnedflux_bin2[2],\
-                                                                                stdev = binnedflux_bin2[3], len_lc = binnedflux_bin2[4], MSE = binnedflux_bin2[5] , total = False)
+                                                                                flux_mean = flux_bin2_mean, stdev = binnedflux_bin2[3],\
+                                                                                   len_lc = binnedflux_bin2[4], MSE = binnedflux_bin2[5] , total = False)
 
                 Xvar_bin2_mean = np.nanmean(Xvar_bin2)
                 Fvar_bin2_mean = np.nanmean(Fvar_bin2)
 
 
-                plot_excess_variance(subdir, df, binnedflux_bin2, Xvar_bin2, XvarErr_bin2, Xvar_bin2_mean, Fvar_bin2, FvarErr_bin2, Fvar_bin2_mean, bin2, sectbysect, group)
+                plot_excess_variance(subdir, uninterp_df, binnedflux_bin2, Xvar_bin2, XvarErr_bin2, Xvar_bin2_mean,\
+                                     Fvar_bin2, FvarErr_bin2, Fvar_bin2_mean, bin2, sectbysect, group)
 
 
                 ##############################################################################################################################
                 ## Plot and save resultant RMS-Flux relation 
                 print("\nCalculating RMS-Flux relation within %s hr and %s hr bins"%(bin1,bin2))
 
-                idx = np.isfinite(binnedflux_bin1[1]) & np.isfinite(Fvar_bin1)
-                rms_flux = np.array((binnedflux_bin1[1][idx], Fvar_bin1[idx], FvarErr_bin1[idx]))
+                idx = np.isfinite(binnedflux_bin1[1]) & np.greater(binnedflux_bin1[6],0.)
+                rms_flux = np.array((binnedflux_bin1[1][idx], binnedflux_bin1[6][idx], binnedflux_bin1[7][idx]))
 
                 try:
                     line1 = np.polyfit(rms_flux[0], rms_flux[1], 1)
-                    plt.errorbar(rms_flux[0], rms_flux[1], yerr= rms_flux[2], color='r', label=bin1+'hr bins, α = %.2e'%line1[0], alpha=0.8, linestyle ="None", fmt='.', markersize = 8)
+                    plt.errorbar(rms_flux[0], rms_flux[1], yerr= rms_flux[2], color='r', label=bin1+'hr bins, α = %.2e'%line1[0],\
+                                 alpha=0.8, linestyle ="None", fmt='.', markersize = 8)
 
-                    x1 = np.linspace(rms_flux[0].min(), rms_flux[0].max(), num=200)
-                    plt.plot(x1,linear(x1,*line1), color='r', linestyle='dotted')
+                    x1 = np.linspace(np.nanmin(rms_flux[0]), np.nanmax(rms_flux[0]), num=200)
                 except: 
                     try:
-                        line1 = op.minimize(Min_PDF, [1.,0.], args=(np.array((rms_flux[1],rms_flux[0]),dtype='object'),linear), method='L-BFGS-B', options={'gtol':1e-6,'disp':False})
+                        line1 = op.minimize(Min_PDF, [1.,0.], args=(np.array((rms_flux[1],rms_flux[0]),dtype='object'),linear),\
+                                            method='L-BFGS-B', options={'gtol':1e-6,'disp':False})
                         line1 = line1['x']
 
-                        plt.errorbar(rms_flux[0], rms_flux[1], yerr= rms_flux[2], color='r', label=bin1+'hr bins, α = %.2e'%line1[0], alpha=0.8, linestyle ="None", fmt='.', markersize = 8)
-                        x1 = np.linspace(rms_flux[0].min(), rms_flux[0].max(), num=200)
-                        plt.plot(x1,linear(x1,*line1), color='r', linestyle='dotted')
+                        plt.errorbar(rms_flux[0], rms_flux[1], yerr= rms_flux[2], color='r', label=bin1+'hr bins, α = %.2e'%line1[0],\
+                                     alpha=0.8, linestyle ="None", fmt='.', markersize = 8)
+                        x1 = np.linspace(np.nanmin(rms_flux[0]), np.nanmax(rms_flux[0]), num=200)
                     except:    
+                        x1 = [0.0,0.0]
                         line1 = [0.0,0.0]
 
-
-
-                idx = np.isfinite(binnedflux_bin2[1]) & np.isfinite(Fvar_bin2)
-                rms_flux = np.array((binnedflux_bin2[1][idx], Fvar_bin2[idx], FvarErr_bin2[idx]))
+                if x1 != [0.0,0.0]:
+                    rsq1, rsq1_sig = r_squared(rms_flux[0], rms_flux[1], line1)
+                    plt.plot(x1,linear(x1,*line1), color='r', linestyle='dotted', label = r"$r^{2}$ = %.3f"%rsq1)    
+                else:
+                    rsq1_sig = False
+                    
+                    
+                idx = np.isfinite(binnedflux_bin2[1]) & np.greater(binnedflux_bin2[6],0.)
+                rms_flux = np.array((binnedflux_bin2[1][idx], binnedflux_bin2[6][idx], binnedflux_bin2[7][idx]))
 
                 try:
                     line2 = np.polyfit(rms_flux[0], rms_flux[1], 1)
-                    plt.errorbar(rms_flux[0], rms_flux[1], yerr= rms_flux[2], color='b', label=bin2+'hr bins, α = %.2e'%line2[0], alpha=0.8, linestyle ="None", fmt='.', markersize = 8)
-                    x2 = np.linspace(rms_flux[0].min(), rms_flux[0].max(), num=200)
+                    plt.errorbar(rms_flux[0], rms_flux[1], yerr= rms_flux[2], color='b', label=bin2+'hr bins, α = %.2e'%line2[0],\
+                                 alpha=0.8, linestyle ="None", fmt='.', markersize = 8)
+                    x2 = np.linspace(np.nanmin(rms_flux[0]), np.nanmax(rms_flux[0]), num=200)
                     plt.plot(x2,linear(x2,*line2), color='b', linestyle='dotted')
                 except: 
                     try:
-                        line2 = op.minimize(Min_PDF, [1.,0.], args=(np.array((rms_flux[1],rms_flux[0]),dtype='object'),linear), method='L-BFGS-B', options={'gtol':1e-6,'disp':False})
+                        line2 = op.minimize(Min_PDF, [1.,0.], args=(np.array((rms_flux[1],rms_flux[0]),dtype='object'),linear),\
+                                            method='L-BFGS-B', options={'gtol':1e-6,'disp':False})
                         line2 = line2['x']
-                        plt.errorbar(rms_flux[0], rms_flux[1], yerr= rms_flux[2], color='b', label=bin2+'hr bins, α = %.2e'%line2[0], alpha=0.8, linestyle ="None", fmt='.', markersize = 8)
-                        x2 = np.linspace(rms_flux[0].min(), rms_flux[0].max(), num=200)
+                        plt.errorbar(rms_flux[0], rms_flux[1], yerr= rms_flux[2], color='b', label=bin2+'hr bins, α = %.2e'%line2[0],\
+                                     alpha=0.8, linestyle ="None", fmt='.', markersize = 8)
+                        x2 = np.linspace(np.nanmin(rms_flux[0]), np.nanmax(rms_flux[0]), num=200)
                         plt.plot(x2,linear(x2,*line2), color='b', linestyle='dotted')
                     except:    
+                        x2 = [0.0,0.0]
                         line2 = [0.0,0.0]
 
-
+                if x2 != [0.0,0.0]:
+                    rsq2, rsq2_sig = r_squared(rms_flux[0], rms_flux[1], line2)
+                    plt.plot(x2,linear(x2,*line2), color='b', linestyle='dotted', label = r"$r^{2}$ = %.3f"%rsq2)
+                else:
+                    rsq2_sig = False
 
                 try:
                     plt.xlabel("Average Flux of Bin (cts s$^{-1}$)")
@@ -1771,7 +2567,7 @@ for subdir, dirs, files in os.walk(rootdir):
                     plt.legend()
 
                     plt.title("RMS-flux relation")
-                    plt.savefig(subdir+'/'+target+'_rms_flux_dist.pdf', format = 'pdf',bbox_inches='tight')
+                    plt.savefig(subdir+'/rms-flux/'+target+'_rms_flux_dist.pdf', format = 'pdf',bbox_inches='tight')
 
         #             plt.show()
                     plt.close()
@@ -1783,10 +2579,10 @@ for subdir, dirs, files in os.walk(rootdir):
 
                 ## Now a flux-binned version of the same relation
                 try:
-                    idx = np.isfinite(binnedflux_bin1[1]) & np.isfinite(Fvar_bin1)
-                    rms_flux = np.array((binnedflux_bin1[1][idx], Fvar_bin1[idx], FvarErr_bin1[idx]))
+                    idx = np.isfinite(binnedflux_bin1[1]) & np.greater(binnedflux_bin1[6],0.)
+                    rms_flux = np.array((binnedflux_bin1[1][idx], binnedflux_bin1[6][idx], binnedflux_bin1[7][idx]))
 
-                    rms_n, rms_bins = np.histogram(rms_flux[0], bins = OptBins(rms_flux[0]), range=(rms_flux[0].min(),rms_flux[0].max()))
+                    rms_n, rms_bins = np.histogram(rms_flux[0], bins = OptBins(rms_flux[0]), range=(np.nanmin(rms_flux[0]),np.nanmax(rms_flux[0])))
                     bin_center = rms_bins[:-1] + np.diff(rms_bins) / 2
 
                     rms_flux_binned = np.array((bin_center, np.zeros(len(bin_center)), np.zeros(len(bin_center))))
@@ -1803,7 +2599,7 @@ for subdir, dirs, files in os.walk(rootdir):
                             if rms_flux[0][j] >= binleft and rms_flux[0][j] < binright:
                                 temp_Fvar.append(rms_flux[1][j])
                                 temp_err.append(rms_flux[2][j])
-                            elif i == len(rms_bins)-1 and rms_flux[0][j] == rms_flux[0].max():
+                            elif i == len(rms_bins)-1 and rms_flux[0][j] == np.nanmax(rms_flux[0]):
                                 temp_Fvar.append(rms_flux[1][j])
                                 temp_err.append(rms_flux[2][j])
 
@@ -1811,29 +2607,33 @@ for subdir, dirs, files in os.walk(rootdir):
                         rms_flux_binned[2][i] = np.sqrt(np.nansum(np.array(temp_err)**2)/len(temp_err)**2)
 
                     try:
-                        line1 = np.polyfit(rms_flux[0], rms_flux[1], 1)
-                        plt.errorbar(rms_flux_binned[0], rms_flux_binned[1], yerr= rms_flux_binned[2], color='r', label=bin1+'hr bins, α = %.2e'%line1[0], alpha=0.8, linestyle ="None",\
-                                     fmt='.', markersize = 8)
-                        x1 = np.linspace(rms_flux_binned[0].min(), rms_flux_binned[0].max(), num=200)
-                        plt.plot(x1,linear(x1,*line1), color='r', linestyle='dotted')
+                        line1 = np.polyfit(rms_flux_binned[0], rms_flux_binned[1], 1)
+                        plt.errorbar(rms_flux_binned[0], rms_flux_binned[1], yerr= rms_flux_binned[2],\
+                                     color='r', label=bin1+'hr bins, α = %.2e'%line1[0], alpha=0.8, linestyle ="None",fmt='.', markersize = 8)
+                        x1 = np.linspace(rms_flux_binned[0].min(), np.nanmax(rms_flux_binned[0]), num=200)
                     except: 
                         try:
-                            line1 = op.minimize(Min_PDF, [1.,0.], args=(np.array((rms_flux_binned[1],rms_bins),dtype='object'),linear), method='L-BFGS-B', options={'gtol':1e-6,'disp':False})
+                            line1 = op.minimize(Min_PDF, [1.,0.], args=(np.array((rms_flux_binned[1],rms_bins),dtype='object'),linear),\
+                                                method='L-BFGS-B', options={'gtol':1e-6,'disp':False})
                             line1 = line1['x']
-                            plt.errorbar(rms_flux_binned[0], rms_flux_binned[1], yerr= rms_flux_binned[2], color='r', label=bin1+'hr bins, α = %.2e'%line1[0], alpha=0.8, linestyle ="None",\
-                                         fmt='.', markersize = 8)
-                            x1 = np.linspace(rms_flux_binned[0].min(), rms_flux_binned[0].max(), num=200)
-                            plt.plot(x1,linear(x1,*line1), color='r', linestyle='dotted')
+                            plt.errorbar(rms_flux_binned[0], rms_flux_binned[1], yerr= rms_flux_binned[2],\
+                                         color='r', label=bin1+'hr bins, α = %.2e'%line1[0], alpha=0.8, linestyle ="None",fmt='.', markersize = 8)
+                            x1 = np.linspace(rms_flux_binned[0].min(), np.nanmax(rms_flux_binned[0]), num=200)
                         except:    
+                            x1 = [0.0,0.0]
                             line1 = [0.0,0.0]
 
+                    if x1 != [0.0,0.0]:
+                        rsq3, rsq3_sig = r_squared(rms_flux_binned[0], rms_flux_binned[1], line1)
+                        plt.plot(x1,linear(x1,*line1), color='r', linestyle='dotted', label = r"$r^{2}$ = %.3f"%rsq3)
+                    else:
+                        rsq3_sig = False
+                    
+                    
+                    idx = np.isfinite(binnedflux_bin2[1]) & np.greater(binnedflux_bin2[6],0.)
+                    rms_flux = np.array((binnedflux_bin2[1][idx], binnedflux_bin2[6][idx], binnedflux_bin2[7][idx]))
 
-
-
-                    idx = np.isfinite(binnedflux_bin2[1]) & np.isfinite(Fvar_bin2)
-                    rms_flux = np.array((binnedflux_bin2[1][idx], Fvar_bin2[idx], FvarErr_bin2[idx]))
-
-                    rms_n, rms_bins = np.histogram(rms_flux[0], bins = OptBins(rms_flux[0]), range=(rms_flux[0].min(),rms_flux[0].max()))
+                    rms_n, rms_bins = np.histogram(rms_flux[0], bins = OptBins(rms_flux[0]), range=(rms_flux[0].min(),np.nanmax(rms_flux[0])))
                     bin_center = rms_bins[:-1] + np.diff(rms_bins) / 2
 
                     rms_flux_binned = np.array((bin_center, np.zeros(len(bin_center)), np.zeros(len(bin_center))))
@@ -1850,7 +2650,7 @@ for subdir, dirs, files in os.walk(rootdir):
                             if rms_flux[0][j] >= binleft and rms_flux[0][j] < binright:
                                 temp_Fvar.append(rms_flux[1][j])
                                 temp_err.append(rms_flux[2][j])
-                            elif i == len(rms_bins)-1 and rms_flux[0][j] == rms_flux[0].max():
+                            elif i == len(rms_bins)-1 and rms_flux[0][j] == np.nanmax(rms_flux[0]):
                                 temp_Fvar.append(rms_flux[1][j])
                                 temp_err.append(rms_flux[2][j])
 
@@ -1859,26 +2659,34 @@ for subdir, dirs, files in os.walk(rootdir):
 
                     try:
                         line2 = np.polyfit(rms_flux[0], rms_flux[1], 1)
-                        plt.errorbar(rms_flux_binned[0], rms_flux_binned[1], yerr= rms_flux_binned[2], color='b', label=bin2+'hr bins, α = %.2e'%line2[0], alpha=0.8, linestyle ="None", fmt='.', markersize = 8)
-                        x2 = np.linspace(rms_flux_binned[0].min(), rms_flux_binned[0].max(), num=200)
-                        plt.plot(x2,linear(x2,*line2), color='b', linestyle='dotted')
+                        plt.errorbar(rms_flux_binned[0], rms_flux_binned[1], yerr= rms_flux_binned[2], color='b',\
+                                     label=bin2+'hr bins, α = %.2e'%line2[0], alpha=0.8, linestyle ="None", fmt='.', markersize = 8)
+                        x2 = np.linspace(rms_flux_binned[0].min(), np.nanmax(rms_flux_binned[0]), num=200)
                     except: 
                         try:
-                            line2 = op.minimize(Min_PDF, [1.,0.], args=(np.array((rms_flux_binned[1],rms_bins),dtype='object'),linear), method='L-BFGS-B', options={'gtol':1e-6,'disp':False})
+                            line2 = op.minimize(Min_PDF, [1.,0.], args=(np.array((rms_flux_binned[1],rms_bins),\
+                                                                                 dtype='object'),linear), method='L-BFGS-B', options={'gtol':1e-6,'disp':False})
                             line2 = line2['x']
-                            plt.errorbar(rms_flux_binned[0], rms_flux_binned[1], yerr= rms_flux_binned[2], color='b', label=bin2+'hr bins, α = %.2e'%line2[0], alpha=0.8, linestyle ="None", fmt='.', markersize = 8)
-                            x2 = np.linspace(rms_flux_binned[0].min(), rms_flux_binned[0].max(), num=200)
-                            plt.plot(x2,linear(x2,*line2), color='b', linestyle='dotted')
+                            plt.errorbar(rms_flux_binned[0], rms_flux_binned[1], yerr= rms_flux_binned[2], color='b',\
+                                         label=bin2+'hr bins, α = %.2e'%line2[0], alpha=0.8, linestyle ="None", fmt='.', markersize = 8)
+                            x2 = np.linspace(rms_flux_binned[0].min(), np.nanmax(rms_flux_binned[0]), num=200)
                         except:    
+                            x2 = [0.0,0.0]
                             line2 = [0.0,0.0]
 
+                    if x2 != [0.0,0.0]:
+                        rsq4, rsq4_sig = r_squared(rms_flux_binned[0], rms_flux_binned[1], line2)
+                        plt.plot(x2,linear(x2,*line2),color='b', linestyle='dotted', label = r"$r^{2}$ = %.3f"%rsq4)
+                    else:
+                        rsq4_sig = False
+                        
                     try:
                         plt.xlabel("Average Flux of Bin (cts s$^{-1}$)")
                         plt.ylabel("RMS (cts s$^{-1}$)")
                         plt.legend()
 
                         plt.title("RMS-flux relation")
-                        plt.savefig(subdir+'/'+target+'_rms_flux_binned_dist.pdf', format = 'pdf',bbox_inches='tight')
+                        plt.savefig(subdir+'/rms-flux/'+target+'_rms_flux_binned_dist.pdf', format = 'pdf',bbox_inches='tight')
 
             #             plt.show()
                         plt.close()
@@ -1891,87 +2699,116 @@ for subdir, dirs, files in os.walk(rootdir):
 
 
 
-    #######################################################################################
-     ## Excess variance and fractional rms amplitude calculations for itotal light curve
+                #######################################################################################
+                ## Excess variance and fractional rms amplitude calculations for itotal light curve
                 print("\nCalculating excess variance of full light curves")
 
 
-                NXvar_reg, Fvar_reg, NXvarErr_reg, FvarErr_reg = excess_variance(uninterp_df[0],uninterp_df[1],uninterp_df[2])
+                NXvar_reg, Fvar_reg, NXvarErr_reg, FvarErr_reg = excess_variance(uninterp_df[0],uninterp_df[1],\
+                                                                                 uninterp_df[2],flux_mean = flux_reg_mean, stdev = flux_reg_stdev)
+                FVamp_reg, FVamp_reg_err = rms_variance(uninterp_df[1],uninterp_df[2])
+                
+                NXvar_bin1, Fvar_bin1, NXvarErr_bin1, FvarErr_bin1 = excess_variance(binnedflux_bin1[0],binnedflux_bin1[1],\
+                                                                                     binnedflux_bin1[2],flux_mean = flux_bin1_mean, stdev = flux_bin1_stdev)
+                FVamp_bin1, FVamp_bin1_err = rms_variance(binnedflux_bin1[1],binnedflux_bin1[2])
 
-                NXvar_bin1, Fvar_bin1, NXvarErr_bin1, FvarErr_bin1 = excess_variance(binnedflux_bin1[0],binnedflux_bin1[1],binnedflux_bin1[2])
-
-                NXvar_bin2, Fvar_bin2, NXvarErr_bin2, FvarErr_bin2 = excess_variance(binnedflux_bin2[0],binnedflux_bin2[1],binnedflux_bin2[2])
-
-
-    #######################################################################################
-    ##Calculate subsequent flux distributions
-
-                delflux_raw = [y for x,y in np.column_stack((np.diff(raw_df[0]),np.diff(raw_df[1])))\
-                               if x > 0.02 and x < 0.0209 ]
-
-
-                delflux_reg = [y for x,y in np.column_stack((np.diff(uninterp_df[0]),np.diff(uninterp_df[1])))\
-                               if x > 0.02 and x < 0.0209 ]
+                NXvar_bin2, Fvar_bin2, NXvarErr_bin2, FvarErr_bin2 = excess_variance(binnedflux_bin2[0],binnedflux_bin2[1],\
+                                                                                     binnedflux_bin2[2],flux_mean = flux_bin2_mean, stdev = flux_bin2_stdev)
+                FVamp_bin2, FVamp_bin2_err = rms_variance(binnedflux_bin2[1],binnedflux_bin2[2])
 
 
-                delflux_bin1 = [y for x,y in np.column_stack((np.diff(binnedflux_bin1[0]),np.diff(binnedflux_bin1[1])))\
-                               if x > 0.1 and x < 0.3 ]
+                #######################################################################################
+                ##Calculate subsequent flux distributions
+                
+                idx_raw = np.where((np.diff(raw_df[0]) > 0.02) & (np.diff(raw_df[0]) < 0.0209))[0]
+                delflux_raw = pd.DataFrame(np.column_stack((np.diff(raw_df[0][idx_raw]),np.diff(raw_df[1][idx_raw]))))
 
-                delflux_bin2 = [y for x,y in np.column_stack((np.diff(binnedflux_bin2[0]),np.diff(binnedflux_bin2[1])))\
-                               if x > 0.3 and x < 0.7 ]
+                idx_reg = np.where((np.diff(uninterp_df[0]) > 0.02) & (np.diff(uninterp_df[0]) < 0.0209))[0]
+                delflux_reg = pd.DataFrame(np.column_stack((np.diff(uninterp_df[0][idx_reg]),np.diff(uninterp_df[1][idx_reg]))))
+
+                idx_bin1 = np.where((np.diff(binnedflux_bin1[0]) > 0.2) & (np.diff(binnedflux_bin1[0]) < 0.3))[0]
+                delflux_bin1 = pd.DataFrame(np.column_stack((np.diff(binnedflux_bin1[0][idx_bin1]),np.diff(binnedflux_bin1[1][idx_bin1]))))
+                    
+                idx_bin2 = np.where((np.diff(binnedflux_bin2[0]) > 0.45) & (np.diff(binnedflux_bin2[0]) < 0.55))[0]
+                delflux_bin2 = pd.DataFrame(np.column_stack((np.diff(binnedflux_bin2[0][idx_bin2]),np.diff(binnedflux_bin2[1][idx_bin2]))))
 
 
                 print("\nFitting histograms of change in flux data")
+                
                 for i in range(4,8):
                     if i == 4 and raw == True:
-                        fit_raw_stdev, delflux_raw_mean, delflux_raw_min, delflux_raw_max, delflux_raw_bins = hist_and_fit(delflux_raw,i,subdir,target,sectbysect,group)
+                        delflux_raw_mean, delflux_raw_stdev, delflux_raw_min, delflux_raw_max,\
+                        delflux_raw_bins = hist_and_fit(delflux_raw,df,i,subdir,target,sectbysect,group)
                     if i == 5:
-                        fit_reg_stdev, delflux_reg_mean, delflux_reg_min, delflux_reg_max, delflux_reg_bins = hist_and_fit(delflux_reg,i,subdir,target,sectbysect,group)
+                        delflux_reg_mean, delflux_reg_stdev, delflux_reg_min, delflux_reg_max,\
+                        delflux_reg_bins = hist_and_fit(delflux_reg,df,i,subdir,target,sectbysect,group)
                     if i == 6:
-                        fit_bin1_stdev, delflux_bin1_mean, delflux_bin1_min, delflux_bin1_max, delflux_bin1_bins = hist_and_fit(delflux_bin1,i,subdir,target,sectbysect,group,bin1=bin1,bin2=bin2)
+                        delflux_bin1_mean, delflux_bin1_stdev, delflux_bin1_min, delflux_bin1_max,\
+                        delflux_bin1_bins = hist_and_fit(delflux_bin1,df,i,subdir,target,sectbysect,group,bin1=bin1,bin2=bin2)
                     if i == 7:
-                        fit_bin2_stdev, delflux_bin2_mean, delflux_bin2_min, delflux_bin2_max, delflux_bin2_bins = hist_and_fit(delflux_bin2,i,subdir,target,sectbysect,group,bin1=bin1,bin2=bin2)
+                        delflux_bin2_mean, delflux_bin2_stdev, delflux_bin2_min, delflux_bin2_max,\
+                        delflux_bin2_bins = hist_and_fit(delflux_bin2,df,i,subdir,target,sectbysect,group,bin1=bin1,bin2=bin2)
 
 
-    #######################################################################################
-    ## Find the chi-squared per degree of freedom (Sesar 2007)
+                #######################################################################################
+                ## Find the chi-squared per degree of freedom (Sesar 2007)
                 print("\nCalculating chi-squared/dof")
                 mean_dif = np.subtract(uninterp_df[1],np.nanmean(uninterp_df[1]))
                 chi2_dof = (len(uninterp_df[1])-1)**-1 * np.sum(mean_dif**2/uninterp_df[2]**2)
 
-                chi2, dof, chi2_dof = chisquare_per_dof(uninterp_df[1],np.mean(uninterp_df[1]),uninterp_df[2])
+                chi2, dof, chi2_dof = chisquare_per_dof(uninterp_df[1],np.nanmean(uninterp_df[1]),uninterp_df[2])
 
 
-
-
-    #######################################################################################
-    ## Write and save results
+                #######################################################################################
+                ## Write and save results
                 print("\nSaving data")
-                if sectbysect == True:
+                if sectbysect== True:
                     target_name = target+' sectors '+group
                 else:
                     target_name = target
 
                 if raw == True:
-                    row = [target_name, flux_raw_mean, lc_raw_stdev, delflux_raw_mean, fit_raw_stdev,\
-                        flux_reg_mean, flux_bin1_mean, flux_bin2_mean,\
-                           lc_reg_stdev, lc_bin1_stdev, lc_bin2_stdev,\
-                               delflux_reg_mean, delflux_bin1_mean, delflux_bin2_mean,\
-                                   fit_reg_stdev, fit_bin1_stdev, fit_bin2_stdev,\
-                                        NXvar_reg, NXvarErr_reg, NXvar_bin1, NXvarErr_bin1, NXvar_bin2, NXvarErr_reg,\
-                                            Fvar_reg, FvarErr_reg, Fvar_bin1, FvarErr_bin1, Fvar_bin2, FvarErr_bin2,\
-                                                tau_inc_min, delt_inc_min, tau_dec_min, delt_dec_min,\
-                                                    chi2, dof, chi2_dof]
+                    row = [target_name, flux_raw_mean, flux_raw_stdev, delflux_raw_mean, delflux_raw_stdev,\
+                        lc_reg_mean, lc_reg_stdev, delflux_reg_mean, delflux_reg_stdev,\
+                           lc_bin1_mean, lc_bin1_stdev, delflux_bin1_mean, delflux_bin1_stdev,\
+                               lc_bin2_mean, lc_bin2_stdev, delflux_bin2_mean, delflux_bin2_stdev,\
+                                   NXvar_reg, NXvarErr_reg,\
+                                       NXvar_bin1, NXvarErr_bin1,\
+                                           NXvar_bin2, NXvarErr_reg,\
+                                                Fvar_reg, FvarErr_reg,\
+                                                    Fvar_bin1, FvarErr_bin1,\
+                                                        Fvar_bin2, FvarErr_bin2,\
+                                                            FVamp_reg, FVamp_reg_err,\
+                                                                FVamp_bin1, FVamp_bin1_err,\
+                                                                    FVamp_bin2, FVamp_bin2_err,\
+                                                                    rsq1_sig, rsq2_sig, rsq3_sig, rsq4_sig,\
+                                                                        tau_inc_min, err_tau_dec, delt_inc_min, timescale_dec_min,\
+                                                                            tau_dec_min, err_tau_inc, delt_dec_min, timescale_inc_min,\
+                                                                                doppler, R_low, R_appox, R_high, Rs_low, Rs_appox, Rs_high,\
+                                                                                    chi2, dof, chi2_dof]
+                           
+                           
+                           
+
 
                 if raw == False:
-                    row = [target, flux_reg_mean, flux_bin1_mean, flux_bin2_mean,\
-                       lc_reg_stdev, lc_bin1_stdev, lc_bin2_stdev,\
-                           delflux_reg_mean, delflux_bin1_mean, delflux_bin2_mean,\
-                               fit_reg_stdev,fit_bin1_stdev, fit_bin2_stdev,\
-                                    Xvar_reg, Xvar_bin1_mean, Xvar_bin2_mean,\
-                                        Fvar_reg, Fvar_bin1_mean, Fvar_bin2_mean,
-                                            tau_inc_min, delt_inc_min, tau_dec_min, delt_dec_min,\
-                                               chi2, dof, chi2_dof]
+                    row = [target, flux_reg_mean, flux_reg_stdev, delflux_reg_mean, delflux_reg_stdev,\
+                        lc_bin1_mean, lc_bin1_stdev, delflux_bin1_mean, delflux_bin1_stdev,\
+                           lc_bin2_mean, lc_bin2_stdev, delflux_bin2_mean, delflux_bin2_stdev,\
+                               NXvar_reg, NXvarErr_reg,\
+                                   NXvar_bin1, NXvarErr_bin1,\
+                                       NXvar_bin2, NXvarErr_reg,\
+                                            Fvar_reg, FvarErr_reg,\
+                                                Fvar_bin1, FvarErr_bin1,\
+                                                    Fvar_bin2, FvarErr_bin2,\
+                                                         FVamp_reg, FVamp_reg_err,\
+                                                                FVamp_bin1, FVamp_bin1_err,\
+                                                                    FVamp_bin2, FVamp_bin2_err,\
+                                                                    rsq1_sig, rsq2_sig, rsq3_sig, rsq4_sig,\
+                                                                        tau_inc_min, err_tau_dec, delt_inc_min, timescale_dec_min,\
+                                                                            tau_dec_min, err_tau_inc, delt_dec_min, timescale_inc_min,\
+                                                                                doppler, R_low, R_appox, R_high, Rs_low, Rs_appox, Rs_high,\
+                                                                                    chi2, dof, chi2_dof]
 
                 writer.writerow(row)
 
@@ -1992,40 +2829,41 @@ if sample == "analysis":
 if sample == "removed":
     read_df.to_excel('/users/rdingler/AGNstudy/LightCurves/Removed_sample/LC_variability_rmv.xlsx',index=False)
     
-if adj == True:            
+# if adj == True:            
     
-    ## User-specified modicfications to data for potential ease of viewing
-    print("\nAdjusting final data form")            
+#     ## User-specified modicfications to data for potential ease of viewing
+#     print("\nAdjusting final data form")            
     
 
-    for x in [y for y in read_df.columns.values if y != 'Target']:
+#     for x in [y for y in read_df.columns.values if y != 'Target']:
 
-        idx = np.isfinite(np.array(read_df[x], dtype = 'float64'))
-        values = np.abs(np.array(read_df[x][idx], dtype = 'float64'))
+#         idx = np.isfinite(np.array(read_df[x], dtype = 'float64'))
+#         values = np.abs(np.array(read_df[x][idx], dtype = 'float64'))
 
-        if x == 'σ^2_NXS(unbinned)' or x == 'err(σ^2_NXS)(unbinned)' or x == 'σ^2_NXS('+str(bin1)+'hr)' or x == 'err(σ^2_NXS)('+str(bin1)+'hr)' or x == 'σ^2_NXS('+str(bin2)+'hr)' or x == 'err(σ^2_NXS)('+str(bin2)+'hr)':
+#         if x == 'σ^2_NXS(unbinned)' or x == 'err(σ^2_NXS)(unbinned)' or x == 'σ^2_NXS('+str(bin1)+'hr)'\
+#             or x == 'err(σ^2_NXS)('+str(bin1)+'hr)' or x == 'σ^2_NXS('+str(bin2)+'hr)' or x == 'err(σ^2_NXS)('+str(bin2)+'hr)':
 
-            read_df[x] = np.round(np.log10(read_df[x]),decimals = 4)
-            new_column = '$log('+x+')'
-            read_df = read_df.rename(columns={x:new_column})
-        else:
-            mean_median_middle = np.nanmean([np.nanmedian(np.log10([x for x in values if x!=0])),np.nanmean(np.log10([x for x in values if x!=0]))])
-            power = int(mean_median_middle + 0.5)
+#             read_df[x] = np.round(np.log10(read_df[x]),decimals = 4)
+#             new_column = '$log('+x+')'
+#             read_df = read_df.rename(columns={x:new_column})
+#         else:
+#             mean_median_middle = np.nanmean([np.nanmedian(np.log10([x for x in values if x!=0])),np.nanmean(np.log10([x for x in values if x!=0]))])
+#             power = int(mean_median_middle + 0.5)
 
-            if power <= 1 and power >= -1:
-                read_df[x] = np.round(read_df[x],decimals = 4)
-            else:
-                read_df[x] = np.round(read_df[x]/(10**power),decimals = 4)
-                new_column = x +' [*10^'+str(power)+']'
-                read_df = read_df.rename(columns={x:new_column})
+#             if power <= 1 and power >= -1:
+#                 read_df[x] = np.round(read_df[x],decimals = 4)
+#             else:
+#                 read_df[x] = np.round(read_df[x]/(10**power),decimals = 4)
+#                 new_column = x +' [*10^'+str(power)+']'
+#                 read_df = read_df.rename(columns={x:new_column})
 
 
-    if sample == "analysis":
-        read_df.to_csv('/users/rdingler/AGNstudy/LightCurves/Analysis/LC_variability_analysis_adjusted.csv',index=False)
-        read_df.to_excel('/users/rdingler/AGNstudy/LightCurves/Analysis/LC_variability_analysis_adjusted.xlsx',index=False)
+#     if sample == "analysis":
+#         read_df.to_csv('/users/rdingler/AGNstudy/LightCurves/Analysis/LC_variability_analysis_adjusted.csv',index=False)
+#         read_df.to_excel('/users/rdingler/AGNstudy/LightCurves/Analysis/LC_variability_analysis_adjusted.xlsx',index=False)
 
-    if sample == "removed":
-        read_df.to_csv('/users/rdingler/AGNstudy/LightCurves/Removed_sample/LC_variability_rmv_adjusted.csv',index=False)
-        read_df.to_excel('/users/rdingler/AGNstudy/LightCurves/Removed_sample/LC_variability_rmv_adjusted.xlsx',index=False)
+#     if sample == "removed":
+#         read_df.to_csv('/users/rdingler/AGNstudy/LightCurves/Removed_sample/LC_variability_rmv_adjusted.csv',index=False)
+#         read_df.to_excel('/users/rdingler/AGNstudy/LightCurves/Removed_sample/LC_variability_rmv_adjusted.xlsx',index=False)
 
 print("Done!")
