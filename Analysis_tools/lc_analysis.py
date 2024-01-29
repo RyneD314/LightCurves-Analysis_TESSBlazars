@@ -2,7 +2,6 @@
 lc_analysis.py
 
 Created 08/2022
-last update: 05/22/23
 
 Original Author: Ryne Dingler
 
@@ -550,41 +549,46 @@ def shortest_timescale(rootdir, target, uninterp_df, z, sectbysect = False, sect
     return(tau_dec_min, delt_dec_min, err_tau_dec, timescale_dec_min, tau_inc_min, delt_inc_min, err_tau_inc, timescale_inc_min)
 
 ###########################################################################################################
-def rms_variance(flux,err):
+def rms_variance(flux,err, mean = 0., std = 0.):
     '''
     inputs:
          flux (array)             - array of flux from the light curve (or segment)
          err (array)              - array of error from the light curve (or segment)
-         mean (float)             - mean of entire flux sample
          
     outputs:
-        sig2_rms (float)          - Fractional variability amplitude
+        sig2_rms (float)          - RMS variability amplitude
+        sig2_rms_err (float)      - Error for RMS variability amplitude
     '''
     
     len_flux = len(flux)
 
-    mean_flux = np.nanmean(flux)
-    mean_err = np.nanmean(err)
-    err_err = np.sqrt(np.nanvar(err))
-
-    rms_scatter = np.sqrt(np.nanvar(flux,ddof = 1))
-    rms_scatter_err = np.divide(rms_scatter,np.sqrt(2*len_flux - 2))
+    if mean == 0.:
+        mean_flux = np.nanmean(flux)
+        rms_scatter = np.sqrt(np.nanvar(flux,ddof = 1))
+    else:
+        mean_flux = mean
+        rms_scatter = std
+        
+    mean_square_err = np.nanmean(err**2)
     
-    if rms_scatter**2 < mean_err**2:
+    err_err = np.sqrt(np.nanvar(err)/len_flux)
+    rms_scatter_err = np.divide(rms_scatter,np.sqrt(2*len_flux - 2))
+        
+    
+    if rms_scatter**2 < mean_square_err:
         return(0.,0.)
     
     else:
-        sig2_rms = np.sqrt(np.subtract(rms_scatter**2,mean_err**2))
-        sig2_rms_err = np.multiply((1./sig2_rms),np.sqrt((rms_scatter*rms_scatter_err)**2 + (mean_err*err_err)**2 ))
+        sig2_rms = np.subtract(rms_scatter**2,mean_square_err)
+        sig2_rms_err = np.multiply(2, np.sqrt((rms_scatter*rms_scatter_err)**2 + (mean_square_err*err_err)**2 ))
 
         return(sig2_rms,sig2_rms_err)
 
 
-
-def excess_variance(time, flux, err, flux_mean = 0, stdev = 0, len_lc = 0, MSE = 0, total=True, normalize = True):
+def excess_variance(time, flux, err, flux_mean = 0., stdev = 0., len_lc = 0., MSE = 0., MSE_err = 0., total=True, normalize = True):
     '''
-    Find excess variance and fractional variance for either the entire light curve or within user-
-    specified bins
+    Find excess variance and fractional variance for either the 
+    entire light curve or within user-specified bins
     
     inputs:
          time (array)             - array of time from the light curve (or segment)
@@ -616,57 +620,56 @@ def excess_variance(time, flux, err, flux_mean = 0, stdev = 0, len_lc = 0, MSE =
     flux = np.array(flux[nonzeroflux])
     err = np.array(err[nonzeroflux])
     
+#     if flux_mean == 0.:
+#         flux_mean = np.nanmean(flux)
+    
     if total == True:
-
-        len_lc = len(time)
-        MSE = np.nanmean(err**2)
-        Xvar = stdev**2 - MSE
+        
+        len_lc = len(flux)
+        MSE = np.nanmean(err**2.)
+        
+        if flux_mean == np.nanmean(flux):
+            Xvar, XvarErr = rms_variance(flux,err)
+        else:
+            Xvar, XvarErr = rms_variance(flux,err, mean = flux_mean, std = stdev)
         
         if normalize == True:
-            NXvar = Xvar/flux_mean**2
-            Fvar = np.sqrt(NXvar)
-        else:
-            NXvar = Xvar
-            Fvar = np.sqrt(NXvar/flux_mean**2)
-        
-        if np.isfinite(Fvar):
-            NXvarErr = np.sqrt(np.add( (np.sqrt(2/len_lc) * MSE/(flux_mean**2))**2,\
-                                              (np.sqrt(MSE/len_lc) * (2*Fvar/flux_mean))**2))
-        else:
-            NXvarErr = np.sqrt(2/len_lc) * MSE/(flux_mean**2)
             
-        NXvarErr = np.array(NXvarErr)        
-        FvarErr = NXvarErr/(2*Fvar)
+            NXvar = Xvar/(np.nanmean(flux)**2.)
+            Fvar = np.sqrt(NXvar)
         
-        try:
-            for i in range(0,len(NXvar)):
-                if NXvar[i] < 0.:
-                    NXvar[i] = 0.
-                    Fvar[i] = 0.
-                    NXvarErr[i] = 0.
-                    FvarErr[i] = 0.
-            return(NXvar,Fvar, NXvarErr, FvarErr)
-
-        except:
-            if NXvar < 0:
-                return(0.,0.,0.,0.)
+            if np.isfinite(Fvar):
+                NXvarErr = np.sqrt(np.add((np.sqrt(2./len_lc) * MSE/(flux_mean**2.))**2.,\
+                                                  (np.sqrt(MSE/len_lc) * (2*Fvar/flux_mean))**2.))
             else:
-                return(NXvar, Fvar, NXvarErr, FvarErr)
+                NXvarErr = np.sqrt(2/len_lc) * MSE/(flux_mean**2.)
+
+        
+            NXvarErr = np.array(NXvarErr)        
+            FvarErr = NXvarErr/(2.*Fvar)
+        
+            return(NXvar, Fvar, NXvarErr, FvarErr)
+        else:
+            return(Xvar, 0., XvarErr, 0.)
+            
     
     else:
         
         Xvar = np.subtract(stdev**2,MSE)
-        Fvar = np.sqrt(np.divide(Xvar,flux**2))
-        XvarErr = []
-        for i in range(0,len(Xvar)):
-            if np.isfinite(Fvar[i]):
-                XvarErr.append(np.sqrt( np.add( (np.sqrt(2/len_lc[i]) * MSE[i]/(flux[i]**2))**2,\
-                                (np.sqrt(MSE[i]/len_lc[i]) * (2*Fvar[i]/flux[i]))**2)))
-            else:
-                XvarErr.append(np.sqrt(2/len_lc[i]) * MSE[i]/(flux[i]**2))
+        NXvar = np.divide(Xvar,flux**2)
+        Fvar = np.sqrt(NXvar)
+        
+        idx = np.where(np.isfinite(np.array(Fvar)) & np.isreal(np.array(Fvar)))[0]
+        
+        err_err = np.divide(stdev[idx],np.sqrt(len_lc[idx]))
+        stdev_err = np.divide(stdev[idx],np.sqrt(np.subtract(np.multiply(2.,len_lc[idx]),2.)))
+        
+        XvarErr = np.multiply(2., np.sqrt(np.add((np.multiply(stdev[idx],stdev_err[idx]))**2.,(np.multiply(MSE[idx],MSE_err[idx]))**2.)))
+        
+        NXvarErr = np.sqrt(np.add(np.multiply(np.sqrt(np.divide(2.,len_lc[idx])),np.divide(MSE[idx],flux[idx]**2.))**2.,\
+                            np.multiply(np.sqrt(np.divide(MSE[idx],len_lc[idx])),np.multiply(2,np.divide(Fvar[idx],flux[idx])))**2.))
 
-        XvarErr = np.array(XvarErr)        
-        FvarErr = XvarErr/(2*Fvar)
+        FvarErr = np.divide(NXvarErr,np.multiply(2.,Fvar[idx]))
     
         try:
             for i in range(0,len(Xvar)):
@@ -679,7 +682,7 @@ def excess_variance(time, flux, err, flux_mean = 0, stdev = 0, len_lc = 0, MSE =
 
         except:
             if Xvar < 0:
-                return(0.,0.,0.,0.)
+                return(np.zeros(len(Xvar)),np.zeros(len(Fvar)),np.zeros(len(XvarErr)),np.zeros(len(FvarErr)))
             else:
                 return(Xvar, Fvar, XvarErr, FvarErr)     
             
@@ -688,9 +691,7 @@ def excess_variance(time, flux, err, flux_mean = 0, stdev = 0, len_lc = 0, MSE =
 def plot_excess_variance(subdir, df, binneddf, Xvar, XvarErr, Xvar_mean, Fvar, FvarErr, Fvar_mean, bin_time, sectbysect, group):
     
     '''
-    Plot the light curves, binned light curves, itrabin excess/fractional variance, ad confidence interval plots for 
-    itrabin excess/fractional variance.
-    
+    Plot the light curves, binned light curves, & itrabin excess/fractional variance, w/ confidence intervals
     inputs:
         subdir (directory)        - The directory in which figures will be saved
         df (DataFrame)            - dataframe containing unbinned light curve data (time,flux,err)
@@ -703,7 +704,13 @@ def plot_excess_variance(subdir, df, binneddf, Xvar, XvarErr, Xvar_mean, Fvar, F
         Fvar_mean (float)         - mean of Fractional variance
         bin_time (string)         - string which specified how many hours are in one bin of binned lc
         sectbysect (boolean)      - sector by sector analysis or not (default is False)
-        group (string)            - current sectors under analysis if sectbysect is True        
+        group (string)            - current sectors under analysis if sectbysect is True
+        
+    outputs:
+        plots: 
+            light curves
+            binned light curves,
+            itrabin excess/fractional variance and confidence intervals
 
     '''
         
@@ -730,7 +737,7 @@ def plot_excess_variance(subdir, df, binneddf, Xvar, XvarErr, Xvar_mean, Fvar, F
 
 
     ax2 = fig.add_subplot(gs[2, :],sharex=ax1)
-    ax2.errorbar(binneddf[0], Xvar, yerr = binneddf[1]*XvarErr, linestyle ="None", fmt='+', markersize = 5, color = 'k')
+    ax2.errorbar(binneddf[0], Xvar, yerr = XvarErr, linestyle ="None", fmt='+', markersize = 5, color = 'k')
     ax2.axhline(Xvar_mean, color = 'k', linestyle = 'solid', label = r'$\langle σ_{XS}^{2} \rangle$ = %.2e'%Xvar_mean)
     
     try:
@@ -744,8 +751,8 @@ def plot_excess_variance(subdir, df, binneddf, Xvar, XvarErr, Xvar_mean, Fvar, F
         ax2.fill_between([binneddf[0].min()-1, np.nanmax(binneddf[0])+1], CI_Xvar.interval(0.95)[0], CI_Xvar.interval(0.95)[1], color = 'g', alpha = 0.5)
 
     except:
-        CI68_Xvar = st.norm.interval(alpha=0.68, loc= Xvar_mean, scale=np.nanstd(Xvar))
-        CI95_Xvar = st.norm.interval(alpha=0.95, loc= Xvar_mean, scale=np.nanstd(Xvar))
+        CI68_Xvar = st.norm.interval(alpha=0.68, loc= Xvar_mean, scale=np.sqrt(np.nanvar(Xvar)))
+        CI95_Xvar = st.norm.interval(alpha=0.95, loc= Xvar_mean, scale=np.sqrt(np.nanvar(Xvar)))
         ax2.fill_between([binneddf[0].min()-1, np.nanmax(binneddf[0])+1], CI68_Xvar[0], CI68_Xvar[1], color = 'g', alpha = 0.5)
         ax2.fill_between([binneddf[0].min()-1, np.nanmax(binneddf[0])+1], CI95_Xvar[0], CI95_Xvar[1], color = 'g', alpha = 0.5)
 
@@ -778,8 +785,8 @@ def plot_excess_variance(subdir, df, binneddf, Xvar, XvarErr, Xvar_mean, Fvar, F
         ax3.fill_between([binneddf[0].min()-1,np.nanmax(binneddf[0])+1], CI_Fvar.interval(0.95)[0], CI_Fvar.interval(0.95)[1], color = 'g', alpha = 0.5)
 
     except:
-        CI68_Fvar = st.norm.interval(alpha=0.68, loc= Fvar_mean, scale=np.nanstd(Fvar))
-        CI95_Fvar = st.norm.interval(alpha=0.95, loc= Fvar_mean, scale=np.nanstd(Fvar))
+        CI68_Fvar = st.norm.interval(alpha=0.68, loc= Fvar_mean, scale=np.sqrt(np.nanvar(Fvar)))
+        CI95_Fvar = st.norm.interval(alpha=0.95, loc= Fvar_mean, scale=np.sqrt(np.nanvar(Fvar)))
         ax3.fill_between([binneddf[0].min()-1,np.nanmax(binneddf[0])+1], CI68_Fvar[0], CI68_Fvar[1], color = 'g', alpha = 0.5)
         ax3.fill_between([binneddf[0].min()-1,np.nanmax(binneddf[0])+1], CI95_Fvar[0], CI95_Fvar[1], color = 'g', alpha = 0.5)
 
@@ -799,7 +806,7 @@ def plot_excess_variance(subdir, df, binneddf, Xvar, XvarErr, Xvar_mean, Fvar, F
         fig.tight_layout()
 
         ax2 = fig.add_subplot(gs[0, :])
-        ax2.errorbar(binneddf[0], Xvar, yerr = binneddf[1]*XvarErr, linestyle ="None", fmt='+', markersize = 4, color = 'k')
+        ax2.errorbar(binneddf[0], Xvar, yerr = XvarErr, linestyle ="None", fmt='+', markersize = 4, color = 'k')
         ax2.axhline(Xvar_mean, color = 'k', linestyle = 'solid', label = r'$\langle σ_{XS}^{2} \rangle$ = %.2e'%Xvar_mean)
 
         # create custom discrete random variable from data set
@@ -845,8 +852,8 @@ def plot_excess_variance(subdir, df, binneddf, Xvar, XvarErr, Xvar_mean, Fvar, F
             ax3.fill_between([binneddf[0].min()-1,np.nanmax(binneddf[0])+1], CI_Fvar.interval(0.95)[0], CI_Fvar.interval(0.95)[1], color = 'g', alpha = 0.5)
 
         except:
-            CI68_Fvar = st.norm.interval(alpha=0.68, loc= Fvar_mean, scale=np.nanstd(Fvar))
-            CI95_Fvar = st.norm.interval(alpha=0.95, loc= Fvar_mean, scale=np.nanstd(Fvar))
+            CI68_Fvar = st.norm.interval(alpha=0.68, loc= Fvar_mean, scale=np.sqrt(np.nanvar(Fvar)))
+            CI95_Fvar = st.norm.interval(alpha=0.95, loc= Fvar_mean, scale=np.sqrt(np.nanvar(Fvar)))
             ax3.fill_between([binneddf[0].min()-1,np.nanmax(binneddf[0])+1], CI68_Fvar[0], CI68_Fvar[1], color = 'g', alpha = 0.5)
             ax3.fill_between([binneddf[0].min()-1,np.nanmax(binneddf[0])+1], CI95_Fvar[0], CI95_Fvar[1], color = 'g', alpha = 0.5)
 
@@ -884,8 +891,8 @@ def plot_excess_variance(subdir, df, binneddf, Xvar, XvarErr, Xvar_mean, Fvar, F
                 plt.fill_between([binneddf[0].min()-1,np.nanmax(binneddf[0])+1], CI_Xvar.interval(0.95)[0], CI_Xvar.interval(0.95)[1], color = 'g', alpha = 0.5)
 
             except:
-                CI68_Xvar = st.norm.interval(alpha=0.68, loc= Xvar_mean, scale=np.nanstd(Xvar))                
-                CI95_Xvar = st.norm.interval(alpha=0.95, loc= Xvar_mean, scale=np.nanstd(Xvar))
+                CI68_Xvar = st.norm.interval(alpha=0.68, loc= Xvar_mean, scale=np.sqrt(np.nanvar(Xvar)))                
+                CI95_Xvar = st.norm.interval(alpha=0.95, loc= Xvar_mean, scale=np.sqrt(np.nanvar(Xvar)))
                 plt.fill_between([binneddf[0].min()-1,np.nanmax(binneddf[0])+1], CI68_Xvar[0], CI68_Xvar[1], color = 'g', alpha = 0.5)
                 plt.fill_between([binneddf[0].min()-1,np.nanmax(binneddf[0])+1], CI95_Xvar[0], CI95_Xvar[1], color = 'g', alpha = 0.5)
 
@@ -1076,6 +1083,9 @@ def rebinning(df,bin1,bin2):
     binMSE_bin1 = []
     binMSE_bin2 = []
     
+    binMSEerr_bin1 = []
+    binMSEerr_bin2 = []
+    
     binRMS_bin1 = []
     binRMS_bin2 = []
     
@@ -1102,8 +1112,9 @@ def rebinning(df,bin1,bin2):
                 N = len([x for x,y in temp_bin if y != 0.0])
                 binN_bin1.append(N)
                 binerr_bin1.append(np.sqrt(np.nansum([y**2 for x,y in temp_bin if y != 0.0]))/N)
-                binstd_bin1.append(np.nanstd([x for x,y in temp_bin if y != 0.0], ddof = 1))
+                binstd_bin1.append(np.sqrt(np.nanvar([x for x,y in temp_bin if y != 0.0], ddof = 1)))
                 binMSE_bin1.append(np.nanmean([y**2 for x,y in temp_bin if y != 0.0]))
+                binMSEerr_bin1.append(np.sqrt(np.nanvar([x for x,y in temp_bin if y != 0.0], ddof = 1))/np.sqrt(N))
                 RMS, RMSerr = rms_variance(np.array([x for x,y in temp_bin if y != 0.0],dtype = float),\
                                            np.array([y for x,y in temp_bin if y != 0.0],dtype = float))
                 binRMS_bin1.append(RMS)
@@ -1125,8 +1136,9 @@ def rebinning(df,bin1,bin2):
                 N = len([x for x,y in temp_bin if y != 0.0])
                 binN_bin2.append(N)
                 binerr_bin2.append(np.sqrt(np.nansum([y**2 for x,y in temp_bin if y != 0.0]))/N)
-                binstd_bin2.append(np.nanstd([x for x,y in temp_bin if y != 0.0], ddof = 1))
+                binstd_bin2.append(np.sqrt(np.nanvar([x for x,y in temp_bin if y != 0.0], ddof = 1)))
                 binMSE_bin2.append(np.nanmean([y**2 for x,y in temp_bin if y != 0.0]))
+                binMSEerr_bin2.append(np.sqrt(np.nanvar([x for x,y in temp_bin if y != 0.0], ddof = 1))/np.sqrt(N))
                 RMS, RMSerr = rms_variance(np.array([x for x,y in temp_bin if y != 0.0],dtype = float),\
                                            np.array([y for x,y in temp_bin if y != 0.0],dtype = float))
                 binRMS_bin2.append(RMS)
@@ -1146,8 +1158,9 @@ def rebinning(df,bin1,bin2):
                     N = len([x for x,y in temp_bin if y != 0.0])
                     binN_bin1.append(N)
                     binerr_bin1.append(np.sqrt(np.nansum([y**2 for x,y in temp_bin if y != 0.0]))/N)
-                    binstd_bin1.append(np.nanstd([x for x,y in temp_bin if y != 0.0], ddof = 1))
+                    binstd_bin1.append(np.sqrt(np.nanvar([x for x,y in temp_bin if y != 0.0], ddof = 1)))
                     binMSE_bin1.append(np.nanmean([y**2 for x,y in temp_bin if y != 0.0]))
+                    binMSEerr_bin1.append(np.sqrt(np.nanvar([x for x,y in temp_bin if y != 0.0], ddof = 1))/np.sqrt(N))
                     RMS, RMSerr = rms_variance(np.array([x for x,y in temp_bin if y != 0.0],dtype = float),\
                                                np.array([y for x,y in temp_bin if y != 0.0],dtype = float))
                     binRMS_bin1.append(RMS)
@@ -1159,8 +1172,9 @@ def rebinning(df,bin1,bin2):
                     N = len([x for x,y in temp_bin if y != 0.0])
                     binN_bin2.append(N)
                     binerr_bin2.append(np.sqrt(np.nansum([y**2 for x,y in temp_bin if y != 0.0]))/N)
-                    binstd_bin2.append(np.nanstd([x for x,y in temp_bin if y != 0.0], ddof = 1))
+                    binstd_bin2.append(np.sqrt(np.nanvar([x for x,y in temp_bin if y != 0.0], ddof = 1)))
                     binMSE_bin2.append(np.nanmean([y**2 for x,y in temp_bin if y != 0.0]))
+                    binMSEerr_bin2.append(np.sqrt(np.nanvar([x for x,y in temp_bin if y != 0.0], ddof = 1))/np.sqrt(N))
                     RMS, RMSerr = rms_variance(np.array([x for x,y in temp_bin if y != 0.0],dtype = float),\
                                                np.array([y for x,y in temp_bin if y != 0.0],dtype = float))
                     binRMS_bin2.append(RMS)
@@ -1173,8 +1187,8 @@ def rebinning(df,bin1,bin2):
                                 
                         
 
-    binnedflux_bin1 = pd.DataFrame(np.column_stack((time_bin1,binflux_bin1,binerr_bin1,binstd_bin1,binN_bin1,binMSE_bin1,binRMS_bin1,binRMSerr_bin1)))
-    binnedflux_bin2 = pd.DataFrame(np.column_stack((time_bin2,binflux_bin2,binerr_bin2,binstd_bin2,binN_bin2,binMSE_bin2,binRMS_bin2,binRMSerr_bin2)))
+    binnedflux_bin1 = pd.DataFrame(np.column_stack((time_bin1,binflux_bin1,binerr_bin1,binstd_bin1,binN_bin1,binMSE_bin1,binRMS_bin1,binRMSerr_bin1,binMSEerr_bin1)))
+    binnedflux_bin2 = pd.DataFrame(np.column_stack((time_bin2,binflux_bin2,binerr_bin2,binstd_bin2,binN_bin2,binMSE_bin2,binRMS_bin2,binRMSerr_bin2,binMSEerr_bin2)))
 
     binnedflux_bin1.replace([np.inf ,0.0, -np.inf], np.nan)
     binnedflux_bin2.replace([np.inf, 0.0, -np.inf], np.nan)
@@ -2474,7 +2488,7 @@ for subdir, dirs, files in os.walk(rootdir):
                 print("\nCalculating excess variance within %s hr and %s hr bins"%(bin1,bin2))
                 Xvar_bin1, Fvar_bin1, XvarErr_bin1, FvarErr_bin1 = excess_variance(binnedflux_bin1[0],binnedflux_bin1[1],binnedflux_bin1[2],\
                                                                                 flux_mean = flux_bin1_mean, stdev = binnedflux_bin1[3],\
-                                                                                   len_lc = binnedflux_bin1[4], MSE = binnedflux_bin1[5] , total = False)
+                                                                                   len_lc = binnedflux_bin1[4], MSE = binnedflux_bin1[5] ,MSE_err = binnedflux_bin1[8] , total = False)
 
                 Xvar_bin1_mean = np.nanmean(Xvar_bin1)
                 Fvar_bin1_mean = np.nanmean(Fvar_bin1)
@@ -2490,7 +2504,7 @@ for subdir, dirs, files in os.walk(rootdir):
 
                 Xvar_bin2, Fvar_bin2, XvarErr_bin2, FvarErr_bin2 = excess_variance(binnedflux_bin2[0],binnedflux_bin2[1],binnedflux_bin2[2],\
                                                                                 flux_mean = flux_bin2_mean, stdev = binnedflux_bin2[3],\
-                                                                                   len_lc = binnedflux_bin2[4], MSE = binnedflux_bin2[5] , total = False)
+                                                                                   len_lc = binnedflux_bin2[4], MSE = binnedflux_bin2[5] ,MSE_err = binnedflux_bin2[8] , total = False)
 
                 Xvar_bin2_mean = np.nanmean(Xvar_bin2)
                 Fvar_bin2_mean = np.nanmean(Fvar_bin2)
